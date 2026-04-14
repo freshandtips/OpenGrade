@@ -93,8 +93,8 @@ Adafruit_MCP4725 dac;
 #define TRACTOR_SENSOR_IN A3 //original tractor sensor voltage monitor
 #define SENSOR_MODE_SWITCH_PIN 12 //manual switch status input (LOW = DAC side selected)
 #define FUNCTION_BTN_SYNC_PIN 8 // function button 1 (active LOW with INPUT_PULLUP)
-#define FUNCTION_BTN_2_PIN 10 // function button 2 (reserved)
-#define FUNCTION_BTN_3_PIN 11 // function button 3 (reserved)
+#define FUNCTION_BTN_2_PIN 10 // function button 2 (+offset)
+#define FUNCTION_BTN_3_PIN 11 // function button 3 (-offset)
 const float ADC_REF_V = 5.0;
 const float DAC_MIN_V = 0.55;
 const float DAC_MAX_V = 2.95;
@@ -106,6 +106,24 @@ bool sendOriginalSensorRawInTelemetry = false; // keep old telemetry layout by d
 bool functionButtonEnabled = true;
 float functionSyncVoltage = 1.80; // destination voltage on first function-button press
 const float FUNCTION_TRANSITION_TIME_SEC = 2.0; // seconds to reach target or return voltage
+/* ------------------------------------------------------------
+   D10/D11 オフセット機能 設定ガイド（日本語）
+   ------------------------------------------------------------
+   目的:
+   - D7 が HIGH（無効/手動）時のみ、D10/D11 で A3 の監視信号へ
+     微小オフセットを加えて DAC 出力します。
+
+   動作:
+   - D10 を 1 回押すごとに +オフセットを 1 カウント加算
+   - D11 を 1 回押すごとに -オフセットを 1 カウント加算
+   - モーメンタリースイッチ前提で、長押ししても 1 回の押下につき 1 カウント
+     （立ち下がりエッジ検出）
+
+   変更ポイント:
+   - FUNCTION_OFFSET_STEP_V を変更すると、1カウントあたりの電圧を変えられます。
+     例）0.20f なら 1 回押下で ±0.2V
+   ------------------------------------------------------------ */
+float FUNCTION_OFFSET_STEP_V = 0.20f;
 
 
 
@@ -177,13 +195,19 @@ unsigned long functionBtnLastChange = 0;
 const byte FUNCTION_BTN_DEBOUNCE_MS = 25;
 byte functionBtn2Debounced = HIGH;
 byte functionBtn2LastRaw = HIGH;
+byte functionBtn2PrevDebounced = HIGH;
+unsigned long functionBtn2LastChange = 0;
 byte functionBtn3Debounced = HIGH;
 byte functionBtn3LastRaw = HIGH;
+byte functionBtn3PrevDebounced = HIGH;
+unsigned long functionBtn3LastChange = 0;
+const byte FUNCTION_BTN23_DEBOUNCE_MS = 25;
 bool functionHoldActive = false;
 bool functionReturnActive = false;
 float functionStoredVoltage = 1.50;
 float functionMoveTargetVoltage = 1.50;
 float functionMoveStepVoltage = 0.0;
+int functionOffsetCount = 0;
 
 void UpdateDACFromPWM(void);
 void WriteDACVoltage(float voltage);
@@ -193,6 +217,7 @@ void UpdateSensorModeSwitchState(void);
 float ReadOriginalSensorVoltageAveraged(void);
 void UpdateFunctionButtonState(void);
 void HandleFunctionButtonPress(byte autoControlActive);
+void HandleFunctionOffsetButtons(void);
 byte MoveDacToward(float targetVoltage, float stepVoltage);
 float CalcTransitionStepVoltage(float fromVoltage, float toVoltage);
 
@@ -227,8 +252,12 @@ void setup()
   functionBtnLastChange = millis();
   functionBtn2LastRaw = digitalRead(FUNCTION_BTN_2_PIN);
   functionBtn2Debounced = functionBtn2LastRaw;
+  functionBtn2PrevDebounced = functionBtn2Debounced;
+  functionBtn2LastChange = millis();
   functionBtn3LastRaw = digitalRead(FUNCTION_BTN_3_PIN);
   functionBtn3Debounced = functionBtn3LastRaw;
+  functionBtn3PrevDebounced = functionBtn3Debounced;
+  functionBtn3LastChange = millis();
 
 
   //keep pulled high and drag low to activate, noise free safe
@@ -663,11 +692,25 @@ void UpdateFunctionButtonState(void)
     functionBtnDebounced = functionBtnLastRaw;
   }
 
-  // 追加機能用ボタン（現在は入力を安定化して保持のみ）
-  if (raw2 != functionBtn2LastRaw) functionBtn2LastRaw = raw2;
-  if (raw3 != functionBtn3LastRaw) functionBtn3LastRaw = raw3;
-  functionBtn2Debounced = functionBtn2LastRaw;
-  functionBtn3Debounced = functionBtn3LastRaw;
+  if (raw2 != functionBtn2LastRaw)
+  {
+    functionBtn2LastRaw = raw2;
+    functionBtn2LastChange = now;
+  }
+  if ((now - functionBtn2LastChange) >= FUNCTION_BTN23_DEBOUNCE_MS)
+  {
+    functionBtn2Debounced = functionBtn2LastRaw;
+  }
+
+  if (raw3 != functionBtn3LastRaw)
+  {
+    functionBtn3LastRaw = raw3;
+    functionBtn3LastChange = now;
+  }
+  if ((now - functionBtn3LastChange) >= FUNCTION_BTN23_DEBOUNCE_MS)
+  {
+    functionBtn3Debounced = functionBtn3LastRaw;
+  }
 }
 
 void HandleFunctionButtonPress(byte autoControlActive)
@@ -697,6 +740,32 @@ void HandleFunctionButtonPress(byte autoControlActive)
   }
 
   functionBtnPrevDebounced = functionBtnDebounced;
+}
+
+void HandleFunctionOffsetButtons(void)
+{
+  // D7 が HIGH（無効/手動）時のみ有効
+  if (digitalRead(WORKSW_PIN) != HIGH)
+  {
+    functionBtn2PrevDebounced = functionBtn2Debounced;
+    functionBtn3PrevDebounced = functionBtn3Debounced;
+    return;
+  }
+
+  // D10: +1カウント（押下1回で1カウント）
+  if (functionBtn2Debounced == LOW && functionBtn2PrevDebounced == HIGH)
+  {
+    functionOffsetCount++;
+  }
+
+  // D11: -1カウント（押下1回で1カウント）
+  if (functionBtn3Debounced == LOW && functionBtn3PrevDebounced == HIGH)
+  {
+    functionOffsetCount--;
+  }
+
+  functionBtn2PrevDebounced = functionBtn2Debounced;
+  functionBtn3PrevDebounced = functionBtn3Debounced;
 }
 
 float CalcTransitionStepVoltage(float fromVoltage, float toVoltage)
@@ -731,6 +800,7 @@ void UpdateDACFromPWM(void)
   if (!dacReady) return;
 
   byte autoControlActive = IsAutoControlActive();
+  HandleFunctionOffsetButtons();
   HandleFunctionButtonPress(autoControlActive);
 
   if (autoControlActive && !prevAutoControlActive && syncDacToOriginalOnAutoEntry)
@@ -743,6 +813,10 @@ void UpdateDACFromPWM(void)
   {
     functionHoldActive = false;
     functionReturnActive = false;
+    float manualOutVoltage = originalSensorVoltage + ((float)functionOffsetCount * FUNCTION_OFFSET_STEP_V);
+    if (manualOutVoltage < DAC_MIN_V) manualOutVoltage = DAC_MIN_V;
+    if (manualOutVoltage > DAC_MAX_V) manualOutVoltage = DAC_MAX_V;
+    dacVoltage = manualOutVoltage;
     WriteDACVoltage(dacVoltage);
     return;
   }
