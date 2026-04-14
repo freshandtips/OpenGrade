@@ -40,6 +40,7 @@
 #include "EEPROM.h"
 #include <Wire.h>
 #include <Adafruit_MCP4725.h>
+#include <math.h>
 //User set variables
 //PWM or relay mode
 bool proportionalValve = true;
@@ -78,6 +79,7 @@ Adafruit_MCP4725 dac;
 #define DAC_I2C_ADDR 0x62
 #define TRACTOR_SENSOR_IN A3 //original tractor sensor voltage monitor
 #define SENSOR_MODE_SWITCH_PIN 12 //manual switch status input (LOW = DAC side selected)
+#define FUNCTION_BTN_PIN A6 // function button input (active LOW, requires external pull-up)
 const float ADC_REF_V = 5.0;
 const float DAC_MIN_V = 0.55;
 const float DAC_MAX_V = 2.95;
@@ -86,6 +88,9 @@ bool dacPositiveRaisesVoltage = true;
 bool syncDacToOriginalOnAutoEntry = true;
 float dacVoltage = 1.50;
 bool sendOriginalSensorRawInTelemetry = false; // keep old telemetry layout by default
+bool functionButtonEnabled = true;
+float functionSyncVoltage = 1.80; // destination voltage on first function-button press
+const float FUNCTION_TRANSITION_TIME_SEC = 2.0; // seconds to reach target or return voltage
 
 
 
@@ -150,6 +155,17 @@ byte sensorModeSwitchLastRaw = HIGH;
 unsigned long sensorModeSwitchLastChange = 0;
 const byte SENSOR_MODE_DEBOUNCE_MS = 25;
 bool dacReady = false;
+byte functionBtnDebounced = HIGH;
+byte functionBtnLastRaw = HIGH;
+byte functionBtnPrevDebounced = HIGH;
+unsigned long functionBtnLastChange = 0;
+const byte FUNCTION_BTN_DEBOUNCE_MS = 25;
+const int FUNCTION_BTN_PRESS_THRESHOLD = 100;
+bool functionHoldActive = false;
+bool functionReturnActive = false;
+float functionStoredVoltage = 1.50;
+float functionMoveTargetVoltage = 1.50;
+float functionMoveStepVoltage = 0.0;
 
 void UpdateDACFromPWM(void);
 void WriteDACVoltage(float voltage);
@@ -157,6 +173,10 @@ byte IsAutoControlActive(void);
 void ReadOriginalSensorVoltage(void);
 void UpdateSensorModeSwitchState(void);
 float ReadOriginalSensorVoltageAveraged(void);
+void UpdateFunctionButtonState(void);
+void HandleFunctionButtonPress(byte autoControlActive);
+byte MoveDacToward(float targetVoltage, float stepVoltage);
+float CalcTransitionStepVoltage(float fromVoltage, float toVoltage);
 
 
 void setup()
@@ -177,9 +197,14 @@ void setup()
   pinMode(LED_AUTO, OUTPUT);
   pinMode(LED_ON, OUTPUT);
   pinMode(SENSOR_MODE_SWITCH_PIN, INPUT_PULLUP);
+  pinMode(FUNCTION_BTN_PIN, INPUT);
   sensorModeSwitchLastRaw = digitalRead(SENSOR_MODE_SWITCH_PIN);
   sensorModeSwitchDebounced = sensorModeSwitchLastRaw;
   sensorModeSwitchLastChange = millis();
+  functionBtnLastRaw = (analogRead(FUNCTION_BTN_PIN) < FUNCTION_BTN_PRESS_THRESHOLD) ? LOW : HIGH;
+  functionBtnDebounced = functionBtnLastRaw;
+  functionBtnPrevDebounced = functionBtnDebounced;
+  functionBtnLastChange = millis();
 
 
   //keep pulled high and drag low to activate, noise free safe
@@ -348,6 +373,7 @@ void loop()
     //section relays
     SetPWM();
     UpdateSensorModeSwitchState();
+    UpdateFunctionButtonState();
     ReadOriginalSensorVoltage();
     UpdateDACFromPWM();
 
@@ -595,6 +621,74 @@ void UpdateSensorModeSwitchState(void)
   }
 }
 
+void UpdateFunctionButtonState(void)
+{
+  byte raw = (analogRead(FUNCTION_BTN_PIN) < FUNCTION_BTN_PRESS_THRESHOLD) ? LOW : HIGH;
+  unsigned long now = millis();
+
+  if (raw != functionBtnLastRaw)
+  {
+    functionBtnLastRaw = raw;
+    functionBtnLastChange = now;
+  }
+
+  if ((now - functionBtnLastChange) >= FUNCTION_BTN_DEBOUNCE_MS)
+  {
+    functionBtnDebounced = functionBtnLastRaw;
+  }
+}
+
+void HandleFunctionButtonPress(byte autoControlActive)
+{
+  if (!functionButtonEnabled)
+  {
+    functionBtnPrevDebounced = functionBtnDebounced;
+    return;
+  }
+
+  if (functionBtnDebounced == LOW && functionBtnPrevDebounced == HIGH && autoControlActive)
+  {
+    if (!functionHoldActive && !functionReturnActive)
+    {
+      functionStoredVoltage = dacVoltage;
+      functionMoveTargetVoltage = functionSyncVoltage;
+      functionMoveStepVoltage = CalcTransitionStepVoltage(dacVoltage, functionMoveTargetVoltage);
+      functionHoldActive = true;
+    }
+    else if (functionHoldActive && !functionReturnActive)
+    {
+      functionHoldActive = false;
+      functionReturnActive = true;
+      functionMoveTargetVoltage = functionStoredVoltage;
+      functionMoveStepVoltage = CalcTransitionStepVoltage(dacVoltage, functionMoveTargetVoltage);
+    }
+  }
+
+  functionBtnPrevDebounced = functionBtnDebounced;
+}
+
+float CalcTransitionStepVoltage(float fromVoltage, float toVoltage)
+{
+  const float loopTimeSec = (float)LOOP_TIME / 1000.0;
+  float transitionLoops = FUNCTION_TRANSITION_TIME_SEC / loopTimeSec;
+  if (transitionLoops < 1.0) transitionLoops = 1.0;
+
+  float step = fabs(toVoltage - fromVoltage) / transitionLoops;
+  if (step < 0.0001) step = 0.0001;
+  return step;
+}
+
+byte MoveDacToward(float targetVoltage, float stepVoltage)
+{
+  float delta = targetVoltage - dacVoltage;
+
+  if (delta > stepVoltage) dacVoltage += stepVoltage;
+  else if (delta < -stepVoltage) dacVoltage -= stepVoltage;
+  else dacVoltage = targetVoltage;
+
+  return (dacVoltage == targetVoltage);
+}
+
 byte IsAutoControlActive(void)
 {
   return (workSwitch == 0 && autoEnable == 1 && sensorModeSwitchDebounced == LOW);
@@ -605,6 +699,7 @@ void UpdateDACFromPWM(void)
   if (!dacReady) return;
 
   byte autoControlActive = IsAutoControlActive();
+  HandleFunctionButtonPress(autoControlActive);
 
   if (autoControlActive && !prevAutoControlActive && syncDacToOriginalOnAutoEntry)
   {
@@ -614,6 +709,22 @@ void UpdateDACFromPWM(void)
 
   if (!autoControlActive)
   {
+    functionHoldActive = false;
+    functionReturnActive = false;
+    WriteDACVoltage(dacVoltage);
+    return;
+  }
+
+  if (functionHoldActive || functionReturnActive)
+  {
+    if (MoveDacToward(functionMoveTargetVoltage, functionMoveStepVoltage) && functionReturnActive)
+    {
+      functionReturnActive = false;
+    }
+
+    if (dacVoltage < DAC_MIN_V) dacVoltage = DAC_MIN_V;
+    if (dacVoltage > DAC_MAX_V) dacVoltage = DAC_MAX_V;
+
     WriteDACVoltage(dacVoltage);
     return;
   }
