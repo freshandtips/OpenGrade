@@ -12,30 +12,43 @@
 
 
 //Output in PROPO MODE: BLADE_DIR,PWM_VALUE,CUTVALUE
-/*Pinout
-   TX1
-   RX1
-   D2 led down
-   D3 Cytron PWM
-   D4 Cytron DIR
-   D5 led up
-   D6 Pin for offset down (GND to activate)
-   D7 Pin to enable the automatic mode (GND to activate)
-   D8 Pin for offset up (GND to activate)
-   D9 led for automatic status.
-   D10 pin btn up
-   D11 pin btn down
-   D12
+/* ------------------------------------------------------------
+   ピン解説（日本語）
+   ------------------------------------------------------------
+   [シリアル]
+   TX1 / RX1 : OpenGrade 通信
 
-   A0 On led, blinking until the config data are recieved
-   A1 input for prop lever to manually control the blade
-   A2 input on the second  prop lever axle for blade offset(optional)
-   A3
-   A4
-   A5
-   A6
-   A7
-*/
+   [デジタル出力]
+   D2  : LED_DW（ブレード下げ方向LED）
+   D3  : Cytron PWM 出力
+   D4  : Cytron DIR 出力
+   D5  : LED_UP（ブレード上げ方向LED）
+   D9  : LED_AUTO（自動状態LED）
+   D13 : LED_BUILTIN（自動時点灯）
+
+   [デジタル入力]
+   D6  : オフセット下げボタン（GNDで有効）
+   D7  : Work/Auto スイッチ（GNDで有効）
+   D8  : オフセット上げボタン（GNDで有効）
+   D10 : 手動上げボタン（GNDで有効、manualMoveBtn=true時）
+   D11 : 手動下げボタン（GNDで有効、manualMoveBtn=true時）
+   D12 : センサーモード切替入力（LOW=Nano/DAC側）
+
+   [アナログ]
+   A0 : LED_ON（設定受信まで点滅）
+   A1 : 手動上下レバー入力
+   A2 : オフセットレバー入力（bladeOffsetPropLever=true時）
+   A3 : 純正センサー電圧監視入力
+   A4 : I2C SDA（MCP4725）
+   A5 : I2C SCL（MCP4725）
+   A6 : 機能ボタン入力（LOW押下、外付けプルアップ推奨）
+   A7 : 予備
+
+   [MCP4725]
+   OUT : ECUへ入れる疑似センサー電圧（手動切替スイッチ経由）
+   VCC : 5V
+   GND : Nano/ECUセンサーGNDと共通
+   ------------------------------------------------------------ */
 
 #include "EEPROM.h"
 #include <Wire.h>
