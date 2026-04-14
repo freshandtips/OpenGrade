@@ -85,6 +85,7 @@ const float DAC_STEP_GAIN = 0.0020;
 bool dacPositiveRaisesVoltage = true;
 bool syncDacToOriginalOnAutoEntry = true;
 float dacVoltage = 1.50;
+bool sendOriginalSensorRawInTelemetry = false; // keep old telemetry layout by default
 
 
 
@@ -144,11 +145,18 @@ int autoLedTime = 0;
 int originalSensorRaw = 0;
 float originalSensorVoltage = 0.0;
 byte prevAutoControlActive = 0;
+byte sensorModeSwitchDebounced = HIGH;
+byte sensorModeSwitchLastRaw = HIGH;
+unsigned long sensorModeSwitchLastChange = 0;
+const byte SENSOR_MODE_DEBOUNCE_MS = 25;
+bool dacReady = false;
 
 void UpdateDACFromPWM(void);
 void WriteDACVoltage(float voltage);
 byte IsAutoControlActive(void);
 void ReadOriginalSensorVoltage(void);
+void UpdateSensorModeSwitchState(void);
+float ReadOriginalSensorVoltageAveraged(void);
 
 
 void setup()
@@ -169,6 +177,9 @@ void setup()
   pinMode(LED_AUTO, OUTPUT);
   pinMode(LED_ON, OUTPUT);
   pinMode(SENSOR_MODE_SWITCH_PIN, INPUT_PULLUP);
+  sensorModeSwitchLastRaw = digitalRead(SENSOR_MODE_SWITCH_PIN);
+  sensorModeSwitchDebounced = sensorModeSwitchLastRaw;
+  sensorModeSwitchLastChange = millis();
 
 
   //keep pulled high and drag low to activate, noise free safe
@@ -188,8 +199,8 @@ void setup()
 
   ReadFromEEPROM();// read saved settings
   Wire.begin();
-  dac.begin(DAC_I2C_ADDR);
-  WriteDACVoltage(dacVoltage);
+  dacReady = dac.begin(DAC_I2C_ADDR);
+  if (dacReady) WriteDACVoltage(dacVoltage);
 
 }
 
@@ -336,6 +347,7 @@ void loop()
 
     //section relays
     SetPWM();
+    UpdateSensorModeSwitchState();
     ReadOriginalSensorVoltage();
     UpdateDACFromPWM();
 
@@ -404,7 +416,8 @@ void loop()
     Serial.print(",");
     Serial.print(LeverUpValue); //just for info, not used
     Serial.print(",");
-    Serial.print(originalSensorRaw); // original tractor sensor (ADC raw), just for info
+    if (sendOriginalSensorRawInTelemetry) Serial.print(originalSensorRaw); // optional debug data
+    else Serial.print(LeverSideValue); // keep old field layout for compatibility
     Serial.print(",");
     Serial.print(bladeOffsetIn); //just for info, not used //(LeverPushValue);
     Serial.print(",");
@@ -554,18 +567,48 @@ void ReadOriginalSensorVoltage(void)
   originalSensorVoltage = ((float)originalSensorRaw / 1023.0) * ADC_REF_V;
 }
 
+float ReadOriginalSensorVoltageAveraged(void)
+{
+  long sum = 0;
+  const byte sampleCount = 8;
+  for (byte i = 0; i < sampleCount; i++) sum += analogRead(TRACTOR_SENSOR_IN);
+
+  int avgRaw = sum / sampleCount;
+  originalSensorRaw = avgRaw;
+  return ((float)avgRaw / 1023.0) * ADC_REF_V;
+}
+
+void UpdateSensorModeSwitchState(void)
+{
+  byte raw = digitalRead(SENSOR_MODE_SWITCH_PIN);
+  unsigned long now = millis();
+
+  if (raw != sensorModeSwitchLastRaw)
+  {
+    sensorModeSwitchLastRaw = raw;
+    sensorModeSwitchLastChange = now;
+  }
+
+  if ((now - sensorModeSwitchLastChange) >= SENSOR_MODE_DEBOUNCE_MS)
+  {
+    sensorModeSwitchDebounced = sensorModeSwitchLastRaw;
+  }
+}
+
 byte IsAutoControlActive(void)
 {
-  return (workSwitch == 0 && autoEnable == 1 && digitalRead(SENSOR_MODE_SWITCH_PIN) == LOW);
+  return (workSwitch == 0 && autoEnable == 1 && sensorModeSwitchDebounced == LOW);
 }
 
 void UpdateDACFromPWM(void)
 {
+  if (!dacReady) return;
+
   byte autoControlActive = IsAutoControlActive();
 
   if (autoControlActive && !prevAutoControlActive && syncDacToOriginalOnAutoEntry)
   {
-    dacVoltage = originalSensorVoltage;
+    dacVoltage = ReadOriginalSensorVoltageAveraged();
   }
   prevAutoControlActive = autoControlActive;
 
