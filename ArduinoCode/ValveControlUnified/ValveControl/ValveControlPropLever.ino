@@ -24,14 +24,14 @@
    D4  : Cytron DIR 出力
    D5  : LED_UP（ブレード上げ方向LED）
    D9  : LED_AUTO（自動状態LED）
-   D13 : LED_BUILTIN（自動時点灯）
+   D13 : LED_BUILTIN（自動時点灯）/ 手動下げボタン入力（manualMoveBtn=true時）
 
    [デジタル入力]
    D6  : オフセット下げボタン（GNDで有効）
    D7  : Work/Auto スイッチ（GNDで有効）
-   D8  : オフセット上げボタン（GNDで有効）
-   D10 : 手動上げボタン（GNDで有効、manualMoveBtn=true時）
-   D11 : 手動下げボタン（GNDで有効、manualMoveBtn=true時）
+   D8  : 機能ボタン1（同期/復帰トグル、GNDで有効）
+   D10 : 機能ボタン2（予備、GNDで有効）
+   D11 : 機能ボタン3（予備、GNDで有効）
    D12 : センサーモード切替入力（LOW=Nano/DAC側）
 
    [アナログ]
@@ -41,8 +41,8 @@
    A3 : 純正センサー電圧監視入力
    A4 : I2C SDA（MCP4725）
    A5 : I2C SCL（MCP4725）
-   A6 : 機能ボタン入力（LOW押下、外付けプルアップ推奨）
-   A7 : 予備
+   A6 : オフセット上げボタン（bladeOffsetBtn=true時、外付けプルアップ推奨）
+   A7 : 手動上げボタン（manualMoveBtn=true時、外付けプルアップ推奨）
 
    [MCP4725]
    OUT : ECUへ入れる疑似センサー電圧（手動切替スイッチ経由）
@@ -70,14 +70,14 @@ bool manualMovePropLever = true; //if a lever for manual operation is installed
 bool invertManMove = false;
 bool manualMoveBtn = false;
 #define LEVER_UP A1 // first axle
-#define BMANUP_PIN 10 //signal (to GND) to move the blade up
-#define BMANDW_PIN 11
+#define BMANUP_PIN A7 //manualMoveBtn=true時のみ使用（外付けプルアップ前提）
+#define BMANDW_PIN 13 //manualMoveBtn=true時のみ使用
 
 // blade off set choose betwen lever or btn or none.
 bool bladeOffsetPropLever = false;
 bool invertBladeOffset = false;
 bool bladeOffsetBtn = false; // true if this fonctionality is used
-#define BOFFUP_PIN 8 //signal (to GND) to move the blade offset up 1 cm?
+#define BOFFUP_PIN A6 //bladeOffsetBtn=true時のみ使用（外付けプルアップ前提）
 #define BOFFDW_PIN 6 //offset down
 #define LEVER_SIDE A2 // second axle, if used for blade offset
 
@@ -92,7 +92,9 @@ Adafruit_MCP4725 dac;
 #define DAC_I2C_ADDR 0x62
 #define TRACTOR_SENSOR_IN A3 //original tractor sensor voltage monitor
 #define SENSOR_MODE_SWITCH_PIN 12 //manual switch status input (LOW = DAC side selected)
-#define FUNCTION_BTN_PIN A6 // function button input (active LOW, requires external pull-up)
+#define FUNCTION_BTN_SYNC_PIN 8 // function button 1 (active LOW with INPUT_PULLUP)
+#define FUNCTION_BTN_2_PIN 10 // function button 2 (reserved)
+#define FUNCTION_BTN_3_PIN 11 // function button 3 (reserved)
 const float ADC_REF_V = 5.0;
 const float DAC_MIN_V = 0.55;
 const float DAC_MAX_V = 2.95;
@@ -173,7 +175,10 @@ byte functionBtnLastRaw = HIGH;
 byte functionBtnPrevDebounced = HIGH;
 unsigned long functionBtnLastChange = 0;
 const byte FUNCTION_BTN_DEBOUNCE_MS = 25;
-const int FUNCTION_BTN_PRESS_THRESHOLD = 100;
+byte functionBtn2Debounced = HIGH;
+byte functionBtn2LastRaw = HIGH;
+byte functionBtn3Debounced = HIGH;
+byte functionBtn3LastRaw = HIGH;
 bool functionHoldActive = false;
 bool functionReturnActive = false;
 float functionStoredVoltage = 1.50;
@@ -210,14 +215,20 @@ void setup()
   pinMode(LED_AUTO, OUTPUT);
   pinMode(LED_ON, OUTPUT);
   pinMode(SENSOR_MODE_SWITCH_PIN, INPUT_PULLUP);
-  pinMode(FUNCTION_BTN_PIN, INPUT);
+  pinMode(FUNCTION_BTN_SYNC_PIN, INPUT_PULLUP);
+  pinMode(FUNCTION_BTN_2_PIN, INPUT_PULLUP);
+  pinMode(FUNCTION_BTN_3_PIN, INPUT_PULLUP);
   sensorModeSwitchLastRaw = digitalRead(SENSOR_MODE_SWITCH_PIN);
   sensorModeSwitchDebounced = sensorModeSwitchLastRaw;
   sensorModeSwitchLastChange = millis();
-  functionBtnLastRaw = (analogRead(FUNCTION_BTN_PIN) < FUNCTION_BTN_PRESS_THRESHOLD) ? LOW : HIGH;
+  functionBtnLastRaw = digitalRead(FUNCTION_BTN_SYNC_PIN);
   functionBtnDebounced = functionBtnLastRaw;
   functionBtnPrevDebounced = functionBtnDebounced;
   functionBtnLastChange = millis();
+  functionBtn2LastRaw = digitalRead(FUNCTION_BTN_2_PIN);
+  functionBtn2Debounced = functionBtn2LastRaw;
+  functionBtn3LastRaw = digitalRead(FUNCTION_BTN_3_PIN);
+  functionBtn3Debounced = functionBtn3LastRaw;
 
 
   //keep pulled high and drag low to activate, noise free safe
@@ -636,7 +647,9 @@ void UpdateSensorModeSwitchState(void)
 
 void UpdateFunctionButtonState(void)
 {
-  byte raw = (analogRead(FUNCTION_BTN_PIN) < FUNCTION_BTN_PRESS_THRESHOLD) ? LOW : HIGH;
+  byte raw = digitalRead(FUNCTION_BTN_SYNC_PIN);
+  byte raw2 = digitalRead(FUNCTION_BTN_2_PIN);
+  byte raw3 = digitalRead(FUNCTION_BTN_3_PIN);
   unsigned long now = millis();
 
   if (raw != functionBtnLastRaw)
@@ -649,6 +662,12 @@ void UpdateFunctionButtonState(void)
   {
     functionBtnDebounced = functionBtnLastRaw;
   }
+
+  // 追加機能用ボタン（現在は入力を安定化して保持のみ）
+  if (raw2 != functionBtn2LastRaw) functionBtn2LastRaw = raw2;
+  if (raw3 != functionBtn3LastRaw) functionBtn3LastRaw = raw3;
+  functionBtn2Debounced = functionBtn2LastRaw;
+  functionBtn3Debounced = functionBtn3LastRaw;
 }
 
 void HandleFunctionButtonPress(byte autoControlActive)
