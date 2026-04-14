@@ -12,32 +12,48 @@
 
 
 //Output in PROPO MODE: BLADE_DIR,PWM_VALUE,CUTVALUE
-/*Pinout
-   TX1
-   RX1
-   D2 led down
-   D3 Cytron PWM
-   D4 Cytron DIR
-   D5 led up
-   D6 Pin for offset down (GND to activate)
-   D7 Pin to enable the automatic mode (GND to activate)
-   D8 Pin for offset up (GND to activate)
-   D9 led for automatic status.
-   D10 pin btn up
-   D11 pin btn down
-   D12
+/* ------------------------------------------------------------
+   ピン解説（日本語）
+   ------------------------------------------------------------
+   [シリアル]
+   TX1 / RX1 : OpenGrade 通信
 
-   A0 On led, blinking until the config data are recieved
-   A1 input for prop lever to manually control the blade
-   A2 input on the second  prop lever axle for blade offset(optional)
-   A3
-   A4
-   A5
-   A6
-   A7
-*/
+   [デジタル出力]
+   D2  : LED_DW（ブレード下げ方向LED）
+   D3  : Cytron PWM 出力
+   D4  : Cytron DIR 出力
+   D5  : LED_UP（ブレード上げ方向LED）
+   D9  : LED_AUTO（自動状態LED）
+   D13 : LED_BUILTIN（自動時点灯）/ 手動下げボタン入力（manualMoveBtn=true時）
+
+   [デジタル入力]
+   D6  : オフセット下げボタン（GNDで有効）
+   D7  : Work/Auto スイッチ（GNDで有効）
+   D8  : 機能ボタン1（同期/復帰トグル、GNDで有効）
+   D10 : 機能ボタン2（予備、GNDで有効）
+   D11 : 機能ボタン3（予備、GNDで有効）
+   D12 : センサーモード切替入力（LOW=Nano/DAC側）
+
+   [アナログ]
+   A0 : LED_ON（設定受信まで点滅）
+   A1 : 手動上下レバー入力
+   A2 : オフセットレバー入力（bladeOffsetPropLever=true時）
+   A3 : 純正センサー電圧監視入力
+   A4 : I2C SDA（MCP4725）
+   A5 : I2C SCL（MCP4725）
+   A6 : オフセット上げボタン（bladeOffsetBtn=true時、外付けプルアップ推奨）
+   A7 : 手動上げボタン（manualMoveBtn=true時、外付けプルアップ推奨）
+
+   [MCP4725]
+   OUT : ECUへ入れる疑似センサー電圧（手動切替スイッチ経由）
+   VCC : 5V
+   GND : Nano/ECUセンサーGNDと共通
+   ------------------------------------------------------------ */
 
 #include "EEPROM.h"
+#include <Wire.h>
+#include <Adafruit_MCP4725.h>
+#include <math.h>
 //User set variables
 //PWM or relay mode
 bool proportionalValve = true;
@@ -54,14 +70,14 @@ bool manualMovePropLever = true; //if a lever for manual operation is installed
 bool invertManMove = false;
 bool manualMoveBtn = false;
 #define LEVER_UP A1 // first axle
-#define BMANUP_PIN 10 //signal (to GND) to move the blade up
-#define BMANDW_PIN 11
+#define BMANUP_PIN A7 //manualMoveBtn=true時のみ使用（外付けプルアップ前提）
+#define BMANDW_PIN 13 //manualMoveBtn=true時のみ使用
 
 // blade off set choose betwen lever or btn or none.
 bool bladeOffsetPropLever = false;
 bool invertBladeOffset = false;
 bool bladeOffsetBtn = false; // true if this fonctionality is used
-#define BOFFUP_PIN 8 //signal (to GND) to move the blade offset up 1 cm?
+#define BOFFUP_PIN A6 //bladeOffsetBtn=true時のみ使用（外付けプルアップ前提）
 #define BOFFDW_PIN 6 //offset down
 #define LEVER_SIDE A2 // second axle, if used for blade offset
 
@@ -71,6 +87,25 @@ bool bladeOffsetBtn = false; // true if this fonctionality is used
 #define LED_AUTO 9 //DO9 led auto
 #define LED_ON A0 //A0 on led 
 
+//DAC + original sensor monitor
+Adafruit_MCP4725 dac;
+#define DAC_I2C_ADDR 0x62
+#define TRACTOR_SENSOR_IN A3 //original tractor sensor voltage monitor
+#define SENSOR_MODE_SWITCH_PIN 12 //manual switch status input (LOW = DAC side selected)
+#define FUNCTION_BTN_SYNC_PIN 8 // function button 1 (active LOW with INPUT_PULLUP)
+#define FUNCTION_BTN_2_PIN 10 // function button 2 (reserved)
+#define FUNCTION_BTN_3_PIN 11 // function button 3 (reserved)
+const float ADC_REF_V = 5.0;
+const float DAC_MIN_V = 0.55;
+const float DAC_MAX_V = 2.95;
+const float DAC_STEP_GAIN = 0.0020;
+bool dacPositiveRaisesVoltage = true;
+bool syncDacToOriginalOnAutoEntry = true;
+float dacVoltage = 1.50;
+bool sendOriginalSensorRawInTelemetry = false; // keep old telemetry layout by default
+bool functionButtonEnabled = true;
+float functionSyncVoltage = 1.80; // destination voltage on first function-button press
+const float FUNCTION_TRANSITION_TIME_SEC = 2.0; // seconds to reach target or return voltage
 
 
 
@@ -127,6 +162,39 @@ int LeverSideValue = 0;
 int LeverPushValue = 0;
 int onLedTime = 0;
 int autoLedTime = 0;
+int originalSensorRaw = 0;
+float originalSensorVoltage = 0.0;
+byte prevAutoControlActive = 0;
+byte sensorModeSwitchDebounced = HIGH;
+byte sensorModeSwitchLastRaw = HIGH;
+unsigned long sensorModeSwitchLastChange = 0;
+const byte SENSOR_MODE_DEBOUNCE_MS = 25;
+bool dacReady = false;
+byte functionBtnDebounced = HIGH;
+byte functionBtnLastRaw = HIGH;
+byte functionBtnPrevDebounced = HIGH;
+unsigned long functionBtnLastChange = 0;
+const byte FUNCTION_BTN_DEBOUNCE_MS = 25;
+byte functionBtn2Debounced = HIGH;
+byte functionBtn2LastRaw = HIGH;
+byte functionBtn3Debounced = HIGH;
+byte functionBtn3LastRaw = HIGH;
+bool functionHoldActive = false;
+bool functionReturnActive = false;
+float functionStoredVoltage = 1.50;
+float functionMoveTargetVoltage = 1.50;
+float functionMoveStepVoltage = 0.0;
+
+void UpdateDACFromPWM(void);
+void WriteDACVoltage(float voltage);
+byte IsAutoControlActive(void);
+void ReadOriginalSensorVoltage(void);
+void UpdateSensorModeSwitchState(void);
+float ReadOriginalSensorVoltageAveraged(void);
+void UpdateFunctionButtonState(void);
+void HandleFunctionButtonPress(byte autoControlActive);
+byte MoveDacToward(float targetVoltage, float stepVoltage);
+float CalcTransitionStepVoltage(float fromVoltage, float toVoltage);
 
 
 void setup()
@@ -146,7 +214,21 @@ void setup()
   pinMode(LED_UP, OUTPUT);
   pinMode(LED_AUTO, OUTPUT);
   pinMode(LED_ON, OUTPUT);
-
+  pinMode(SENSOR_MODE_SWITCH_PIN, INPUT_PULLUP);
+  pinMode(FUNCTION_BTN_SYNC_PIN, INPUT_PULLUP);
+  pinMode(FUNCTION_BTN_2_PIN, INPUT_PULLUP);
+  pinMode(FUNCTION_BTN_3_PIN, INPUT_PULLUP);
+  sensorModeSwitchLastRaw = digitalRead(SENSOR_MODE_SWITCH_PIN);
+  sensorModeSwitchDebounced = sensorModeSwitchLastRaw;
+  sensorModeSwitchLastChange = millis();
+  functionBtnLastRaw = digitalRead(FUNCTION_BTN_SYNC_PIN);
+  functionBtnDebounced = functionBtnLastRaw;
+  functionBtnPrevDebounced = functionBtnDebounced;
+  functionBtnLastChange = millis();
+  functionBtn2LastRaw = digitalRead(FUNCTION_BTN_2_PIN);
+  functionBtn2Debounced = functionBtn2LastRaw;
+  functionBtn3LastRaw = digitalRead(FUNCTION_BTN_3_PIN);
+  functionBtn3Debounced = functionBtn3LastRaw;
 
 
   //keep pulled high and drag low to activate, noise free safe
@@ -165,6 +247,9 @@ void setup()
   }
 
   ReadFromEEPROM();// read saved settings
+  Wire.begin();
+  dacReady = dac.begin(DAC_I2C_ADDR);
+  if (dacReady) WriteDACVoltage(dacVoltage);
 
 }
 
@@ -311,6 +396,10 @@ void loop()
 
     //section relays
     SetPWM();
+    UpdateSensorModeSwitchState();
+    UpdateFunctionButtonState();
+    ReadOriginalSensorVoltage();
+    UpdateDACFromPWM();
 
     if (pwmValue < 0) {
       digitalWrite(LED_DW, HIGH); // lowering the blade
@@ -377,7 +466,8 @@ void loop()
     Serial.print(",");
     Serial.print(LeverUpValue); //just for info, not used
     Serial.print(",");
-    Serial.print(LeverSideValue); //just for info, not used
+    if (sendOriginalSensorRawInTelemetry) Serial.print(originalSensorRaw); // optional debug data
+    else Serial.print(LeverSideValue); // keep old field layout for compatibility
     Serial.print(",");
     Serial.print(bladeOffsetIn); //just for info, not used //(LeverPushValue);
     Serial.print(",");
@@ -519,6 +609,177 @@ void SetPWM(void)
 
 
 
+}
+
+void ReadOriginalSensorVoltage(void)
+{
+  originalSensorRaw = analogRead(TRACTOR_SENSOR_IN);
+  originalSensorVoltage = ((float)originalSensorRaw / 1023.0) * ADC_REF_V;
+}
+
+float ReadOriginalSensorVoltageAveraged(void)
+{
+  long sum = 0;
+  const byte sampleCount = 8;
+  for (byte i = 0; i < sampleCount; i++) sum += analogRead(TRACTOR_SENSOR_IN);
+
+  int avgRaw = sum / sampleCount;
+  originalSensorRaw = avgRaw;
+  return ((float)avgRaw / 1023.0) * ADC_REF_V;
+}
+
+void UpdateSensorModeSwitchState(void)
+{
+  byte raw = digitalRead(SENSOR_MODE_SWITCH_PIN);
+  unsigned long now = millis();
+
+  if (raw != sensorModeSwitchLastRaw)
+  {
+    sensorModeSwitchLastRaw = raw;
+    sensorModeSwitchLastChange = now;
+  }
+
+  if ((now - sensorModeSwitchLastChange) >= SENSOR_MODE_DEBOUNCE_MS)
+  {
+    sensorModeSwitchDebounced = sensorModeSwitchLastRaw;
+  }
+}
+
+void UpdateFunctionButtonState(void)
+{
+  byte raw = digitalRead(FUNCTION_BTN_SYNC_PIN);
+  byte raw2 = digitalRead(FUNCTION_BTN_2_PIN);
+  byte raw3 = digitalRead(FUNCTION_BTN_3_PIN);
+  unsigned long now = millis();
+
+  if (raw != functionBtnLastRaw)
+  {
+    functionBtnLastRaw = raw;
+    functionBtnLastChange = now;
+  }
+
+  if ((now - functionBtnLastChange) >= FUNCTION_BTN_DEBOUNCE_MS)
+  {
+    functionBtnDebounced = functionBtnLastRaw;
+  }
+
+  // 追加機能用ボタン（現在は入力を安定化して保持のみ）
+  if (raw2 != functionBtn2LastRaw) functionBtn2LastRaw = raw2;
+  if (raw3 != functionBtn3LastRaw) functionBtn3LastRaw = raw3;
+  functionBtn2Debounced = functionBtn2LastRaw;
+  functionBtn3Debounced = functionBtn3LastRaw;
+}
+
+void HandleFunctionButtonPress(byte autoControlActive)
+{
+  if (!functionButtonEnabled)
+  {
+    functionBtnPrevDebounced = functionBtnDebounced;
+    return;
+  }
+
+  if (functionBtnDebounced == LOW && functionBtnPrevDebounced == HIGH && autoControlActive)
+  {
+    if (!functionHoldActive && !functionReturnActive)
+    {
+      functionStoredVoltage = dacVoltage;
+      functionMoveTargetVoltage = functionSyncVoltage;
+      functionMoveStepVoltage = CalcTransitionStepVoltage(dacVoltage, functionMoveTargetVoltage);
+      functionHoldActive = true;
+    }
+    else if (functionHoldActive && !functionReturnActive)
+    {
+      functionHoldActive = false;
+      functionReturnActive = true;
+      functionMoveTargetVoltage = functionStoredVoltage;
+      functionMoveStepVoltage = CalcTransitionStepVoltage(dacVoltage, functionMoveTargetVoltage);
+    }
+  }
+
+  functionBtnPrevDebounced = functionBtnDebounced;
+}
+
+float CalcTransitionStepVoltage(float fromVoltage, float toVoltage)
+{
+  const float loopTimeSec = (float)LOOP_TIME / 1000.0;
+  float transitionLoops = FUNCTION_TRANSITION_TIME_SEC / loopTimeSec;
+  if (transitionLoops < 1.0) transitionLoops = 1.0;
+
+  float step = fabs(toVoltage - fromVoltage) / transitionLoops;
+  if (step < 0.0001) step = 0.0001;
+  return step;
+}
+
+byte MoveDacToward(float targetVoltage, float stepVoltage)
+{
+  float delta = targetVoltage - dacVoltage;
+
+  if (delta > stepVoltage) dacVoltage += stepVoltage;
+  else if (delta < -stepVoltage) dacVoltage -= stepVoltage;
+  else dacVoltage = targetVoltage;
+
+  return (dacVoltage == targetVoltage);
+}
+
+byte IsAutoControlActive(void)
+{
+  return (workSwitch == 0 && autoEnable == 1 && sensorModeSwitchDebounced == LOW);
+}
+
+void UpdateDACFromPWM(void)
+{
+  if (!dacReady) return;
+
+  byte autoControlActive = IsAutoControlActive();
+  HandleFunctionButtonPress(autoControlActive);
+
+  if (autoControlActive && !prevAutoControlActive && syncDacToOriginalOnAutoEntry)
+  {
+    dacVoltage = ReadOriginalSensorVoltageAveraged();
+  }
+  prevAutoControlActive = autoControlActive;
+
+  if (!autoControlActive)
+  {
+    functionHoldActive = false;
+    functionReturnActive = false;
+    WriteDACVoltage(dacVoltage);
+    return;
+  }
+
+  if (functionHoldActive || functionReturnActive)
+  {
+    if (MoveDacToward(functionMoveTargetVoltage, functionMoveStepVoltage) && functionReturnActive)
+    {
+      functionReturnActive = false;
+    }
+
+    if (dacVoltage < DAC_MIN_V) dacVoltage = DAC_MIN_V;
+    if (dacVoltage > DAC_MAX_V) dacVoltage = DAC_MAX_V;
+
+    WriteDACVoltage(dacVoltage);
+    return;
+  }
+
+  float step = (float)pwmValue * DAC_STEP_GAIN;
+  if (!dacPositiveRaisesVoltage) step = -step;
+
+  dacVoltage += step;
+
+  if (dacVoltage < DAC_MIN_V) dacVoltage = DAC_MIN_V;
+  if (dacVoltage > DAC_MAX_V) dacVoltage = DAC_MAX_V;
+
+  WriteDACVoltage(dacVoltage);
+}
+
+void WriteDACVoltage(float voltage)
+{
+  if (voltage < 0.0) voltage = 0.0;
+  if (voltage > ADC_REF_V) voltage = ADC_REF_V;
+
+  uint16_t dacCode = (uint16_t)((voltage / ADC_REF_V) * 4095.0);
+  if (dacCode > 4095) dacCode = 4095;
+  dac.setVoltage(dacCode, false);
 }
 
 void SaveToEEPROM() {
