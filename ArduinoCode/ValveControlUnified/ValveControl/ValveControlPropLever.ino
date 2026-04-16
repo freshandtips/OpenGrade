@@ -110,8 +110,8 @@ const float FUNCTION_TRANSITION_TIME_SEC = 2.0; // seconds to reach target or re
    D10/D11 オフセット機能 設定ガイド（日本語）
    ------------------------------------------------------------
    目的:
-   - D7 が HIGH（無効/手動）時のみ、D10/D11 で A3 の監視信号へ
-     微小オフセットを加えて DAC 出力します。
+   - A3 にオリジナル信号が入っている時のみ、D8/D10/D11 を機能させます。
+   - D10/D11 で A3 の監視信号へ微小オフセットを加えて DAC 出力します。
 
    動作:
    - D10 を 1 回押すごとに +オフセットを 1 カウント加算
@@ -124,6 +124,8 @@ const float FUNCTION_TRANSITION_TIME_SEC = 2.0; // seconds to reach target or re
      例）0.20f なら 1 回押下で ±0.2V
    ------------------------------------------------------------ */
 float FUNCTION_OFFSET_STEP_V = 0.20f;
+const float ORIGINAL_SIGNAL_PRESENT_MIN_V = 0.10f;
+const float ORIGINAL_SIGNAL_PRESENT_MAX_V = 4.90f;
 
 
 
@@ -182,6 +184,7 @@ int onLedTime = 0;
 int autoLedTime = 0;
 int originalSensorRaw = 0;
 float originalSensorVoltage = 0.0;
+bool originalSignalPresent = false;
 byte prevAutoControlActive = 0;
 byte sensorModeSwitchDebounced = HIGH;
 byte sensorModeSwitchLastRaw = HIGH;
@@ -218,6 +221,7 @@ float ReadOriginalSensorVoltageAveraged(void);
 void UpdateFunctionButtonState(void);
 void HandleFunctionButtonPress(byte autoControlActive);
 void HandleFunctionOffsetButtons(void);
+byte IsOriginalSignalAvailable(void);
 byte MoveDacToward(float targetVoltage, float stepVoltage);
 float CalcTransitionStepVoltage(float fromVoltage, float toVoltage);
 
@@ -644,6 +648,7 @@ void ReadOriginalSensorVoltage(void)
 {
   originalSensorRaw = analogRead(TRACTOR_SENSOR_IN);
   originalSensorVoltage = ((float)originalSensorRaw / 1023.0) * ADC_REF_V;
+  originalSignalPresent = (originalSensorVoltage >= ORIGINAL_SIGNAL_PRESENT_MIN_V && originalSensorVoltage <= ORIGINAL_SIGNAL_PRESENT_MAX_V);
 }
 
 float ReadOriginalSensorVoltageAveraged(void)
@@ -715,13 +720,21 @@ void UpdateFunctionButtonState(void)
 
 void HandleFunctionButtonPress(byte autoControlActive)
 {
+  (void)autoControlActive;
+
   if (!functionButtonEnabled)
   {
     functionBtnPrevDebounced = functionBtnDebounced;
     return;
   }
 
-  if (functionBtnDebounced == LOW && functionBtnPrevDebounced == HIGH && autoControlActive)
+  if (!IsOriginalSignalAvailable())
+  {
+    functionBtnPrevDebounced = functionBtnDebounced;
+    return;
+  }
+
+  if (functionBtnDebounced == LOW && functionBtnPrevDebounced == HIGH)
   {
     if (!functionHoldActive && !functionReturnActive)
     {
@@ -740,6 +753,37 @@ void HandleFunctionButtonPress(byte autoControlActive)
   }
 
   functionBtnPrevDebounced = functionBtnDebounced;
+}
+
+void HandleFunctionOffsetButtons(void)
+{
+  // オリジナル信号が有効な時のみ機能
+  if (!IsOriginalSignalAvailable())
+  {
+    functionBtn2PrevDebounced = functionBtn2Debounced;
+    functionBtn3PrevDebounced = functionBtn3Debounced;
+    return;
+  }
+
+  // D10: +1カウント（押下1回で1カウント）
+  if (functionBtn2Debounced == LOW && functionBtn2PrevDebounced == HIGH)
+  {
+    functionOffsetCount++;
+  }
+
+  // D11: -1カウント（押下1回で1カウント）
+  if (functionBtn3Debounced == LOW && functionBtn3PrevDebounced == HIGH)
+  {
+    functionOffsetCount--;
+  }
+
+  functionBtn2PrevDebounced = functionBtn2Debounced;
+  functionBtn3PrevDebounced = functionBtn3Debounced;
+}
+
+byte IsOriginalSignalAvailable(void)
+{
+  return originalSignalPresent;
 }
 
 void HandleFunctionOffsetButtons(void)
@@ -809,18 +853,6 @@ void UpdateDACFromPWM(void)
   }
   prevAutoControlActive = autoControlActive;
 
-  if (!autoControlActive)
-  {
-    functionHoldActive = false;
-    functionReturnActive = false;
-    float manualOutVoltage = originalSensorVoltage + ((float)functionOffsetCount * FUNCTION_OFFSET_STEP_V);
-    if (manualOutVoltage < DAC_MIN_V) manualOutVoltage = DAC_MIN_V;
-    if (manualOutVoltage > DAC_MAX_V) manualOutVoltage = DAC_MAX_V;
-    dacVoltage = manualOutVoltage;
-    WriteDACVoltage(dacVoltage);
-    return;
-  }
-
   if (functionHoldActive || functionReturnActive)
   {
     if (MoveDacToward(functionMoveTargetVoltage, functionMoveStepVoltage) && functionReturnActive)
@@ -831,6 +863,16 @@ void UpdateDACFromPWM(void)
     if (dacVoltage < DAC_MIN_V) dacVoltage = DAC_MIN_V;
     if (dacVoltage > DAC_MAX_V) dacVoltage = DAC_MAX_V;
 
+    WriteDACVoltage(dacVoltage);
+    return;
+  }
+
+  if (!autoControlActive)
+  {
+    float manualOutVoltage = originalSensorVoltage + ((float)functionOffsetCount * FUNCTION_OFFSET_STEP_V);
+    if (manualOutVoltage < DAC_MIN_V) manualOutVoltage = DAC_MIN_V;
+    if (manualOutVoltage > DAC_MAX_V) manualOutVoltage = DAC_MAX_V;
+    dacVoltage = manualOutVoltage;
     WriteDACVoltage(dacVoltage);
     return;
   }
