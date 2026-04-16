@@ -41,7 +41,7 @@
    A3 : 純正センサー電圧監視入力
    A4 : I2C SDA（MCP4725）
    A5 : I2C SCL（MCP4725）
-   A6 : オフセット上げボタン（bladeOffsetBtn=true時、外付けプルアップ推奨）
+   A6 : MCP OUT監視入力（D8優先制御用）/ オフセット上げボタン（bladeOffsetBtn=true時）
    A7 : 手動上げボタン（manualMoveBtn=true時、外付けプルアップ推奨）
 
    [MCP4725]
@@ -95,6 +95,7 @@ Adafruit_MCP4725 dac;
 #define FUNCTION_BTN_SYNC_PIN 8 // function button 1 (active LOW with INPUT_PULLUP)
 #define FUNCTION_BTN_2_PIN 10 // function button 2 (+offset)
 #define FUNCTION_BTN_3_PIN 11 // function button 3 (-offset)
+#define MCP_OUT_MONITOR_PIN A6 // MCP OUT monitor input (for D8 priority control after D7 auto-on)
 const float ADC_REF_V = 5.0;
 const float DAC_MIN_V = 0.55;
 const float DAC_MAX_V = 2.95;
@@ -126,6 +127,30 @@ const float FUNCTION_TRANSITION_TIME_SEC = 2.0; // seconds to reach target or re
 float FUNCTION_OFFSET_STEP_V = 0.20f;
 const float ORIGINAL_SIGNAL_PRESENT_MIN_V = 0.10f;
 const float ORIGINAL_SIGNAL_PRESENT_MAX_V = 4.90f;
+/* ------------------------------------------------------------
+   Auto時(D7有効)の D3/D4 -> MCP4725 変換設定（日本語）
+   ------------------------------------------------------------
+   目的:
+   - D7を押してAutoに入った後は、OpenGradeからの出力である
+     DIR(D4) と PWM(D3) を使って MCP4725 出力電圧を作る。
+   - Auto中は D10/D11 オフセットボタンは無効化する。
+
+   DIRの決まり方（このコード内）:
+   - pwmValue < 0 なら DIR_ENABLE(D4)=HIGH  （下げ方向）
+   - pwmValue >=0 なら DIR_ENABLE(D4)=LOW   （上げ方向）
+   ※ SetPWM() の末尾で設定
+
+   電圧変換:
+   - PWM(0..255) を強度として 0.50V～1.60V の範囲へ変換
+   - DIR=LOW  : 中心から上側へ（電圧上昇）
+   - DIR=HIGH : 中心から下側へ（電圧下降）
+
+   調整ポイント:
+   - DAC_AUTO_MIN_V / DAC_AUTO_MAX_V を変更すると自動時の出力幅を変更可能
+   ------------------------------------------------------------ */
+const float DAC_AUTO_MIN_V = 0.50f;
+const float DAC_AUTO_MAX_V = 1.60f;
+bool useMcpOutMonitorForFunctionButton = true; // D7 auto-on後のD8基準をA3ではなくMCP OUT監視値にする
 
 
 
@@ -185,6 +210,9 @@ int autoLedTime = 0;
 int originalSensorRaw = 0;
 float originalSensorVoltage = 0.0;
 bool originalSignalPresent = false;
+int mcpOutMonitorRaw = 0;
+float mcpOutMonitorVoltage = 0.0;
+bool mcpOutMonitorPresent = false;
 byte prevAutoControlActive = 0;
 byte sensorModeSwitchDebounced = HIGH;
 byte sensorModeSwitchLastRaw = HIGH;
@@ -218,6 +246,7 @@ byte IsAutoControlActive(void);
 void ReadOriginalSensorVoltage(void);
 void UpdateSensorModeSwitchState(void);
 float ReadOriginalSensorVoltageAveraged(void);
+void ReadMcpOutMonitorVoltage(void);
 void UpdateFunctionButtonState(void);
 void HandleFunctionButtonPress(byte autoControlActive);
 void HandleOffsetButtonsByOriginalSignal(void);
@@ -246,6 +275,7 @@ void setup()
   pinMode(FUNCTION_BTN_SYNC_PIN, INPUT_PULLUP);
   pinMode(FUNCTION_BTN_2_PIN, INPUT_PULLUP);
   pinMode(FUNCTION_BTN_3_PIN, INPUT_PULLUP);
+  pinMode(MCP_OUT_MONITOR_PIN, INPUT);
   sensorModeSwitchLastRaw = digitalRead(SENSOR_MODE_SWITCH_PIN);
   sensorModeSwitchDebounced = sensorModeSwitchLastRaw;
   sensorModeSwitchLastChange = millis();
@@ -431,6 +461,7 @@ void loop()
     UpdateSensorModeSwitchState();
     UpdateFunctionButtonState();
     ReadOriginalSensorVoltage();
+    ReadMcpOutMonitorVoltage();
     UpdateDACFromPWM();
 
     if (pwmValue < 0) {
@@ -717,17 +748,22 @@ void UpdateFunctionButtonState(void)
   }
 }
 
+void ReadMcpOutMonitorVoltage(void)
+{
+  mcpOutMonitorRaw = analogRead(MCP_OUT_MONITOR_PIN);
+  mcpOutMonitorVoltage = ((float)mcpOutMonitorRaw / 1023.0) * ADC_REF_V;
+  mcpOutMonitorPresent = (mcpOutMonitorVoltage >= 0.05 && mcpOutMonitorVoltage <= 4.95);
+}
+
 void HandleFunctionButtonPress(byte autoControlActive)
 {
-  (void)autoControlActive;
-
   if (!functionButtonEnabled)
   {
     functionBtnPrevDebounced = functionBtnDebounced;
     return;
   }
 
-  if (!originalSignalPresent)
+  if (!originalSignalPresent && !mcpOutMonitorPresent)
   {
     functionBtnPrevDebounced = functionBtnDebounced;
     return;
@@ -737,6 +773,11 @@ void HandleFunctionButtonPress(byte autoControlActive)
   {
     if (!functionHoldActive && !functionReturnActive)
     {
+      // D7押下後(autoControlActive)はMCP OUT監視値を優先基準にする
+      if (useMcpOutMonitorForFunctionButton && autoControlActive && mcpOutMonitorPresent)
+      {
+        dacVoltage = mcpOutMonitorVoltage;
+      }
       functionStoredVoltage = dacVoltage;
       functionMoveTargetVoltage = functionSyncVoltage;
       functionMoveStepVoltage = CalcTransitionStepVoltage(dacVoltage, functionMoveTargetVoltage);
@@ -756,6 +797,14 @@ void HandleFunctionButtonPress(byte autoControlActive)
 
 void HandleOffsetButtonsByOriginalSignal(void)
 {
+  // D7を押してAuto中はD10/D11を無効化
+  if (workSwitch == 0)
+  {
+    functionBtn2PrevDebounced = functionBtn2Debounced;
+    functionBtn3PrevDebounced = functionBtn3Debounced;
+    return;
+  }
+
   // オリジナル信号が有効な時のみ機能
   if (!originalSignalPresent)
   {
@@ -845,33 +894,32 @@ void UpdateDACFromPWM(void)
     return;
   }
 
-  if (!autoControlActive)
+  // Auto時は D3(PWM_OUT) と D4(DIR_ENABLE) の状態からMCP電圧を直接生成
+  float pwmRatio = (float)pwmDrive / 255.0;
+  if (pwmRatio < 0.0) pwmRatio = 0.0;
+  if (pwmRatio > 1.0) pwmRatio = 1.0;
+
+  float autoCenter = (DAC_AUTO_MIN_V + DAC_AUTO_MAX_V) * 0.5;
+  float autoHalfSpan = (DAC_AUTO_MAX_V - DAC_AUTO_MIN_V) * 0.5;
+  byte dirState = digitalRead(DIR_ENABLE);
+
+  if (pwmDrive == 0)
   {
-    float manualOutVoltage = originalSensorVoltage + ((float)functionOffsetCount * FUNCTION_OFFSET_STEP_V);
-    if (manualOutVoltage < DAC_MIN_V) manualOutVoltage = DAC_MIN_V;
-    if (manualOutVoltage > DAC_MAX_V) manualOutVoltage = DAC_MAX_V;
-    dacVoltage = manualOutVoltage;
-    WriteDACVoltage(dacVoltage);
-    return;
+    dacVoltage = autoCenter;
+  }
+  else if (dirState == HIGH)
+  {
+    // 下げ方向（DIR=HIGH）
+    dacVoltage = autoCenter - (autoHalfSpan * pwmRatio);
+  }
+  else
+  {
+    // 上げ方向（DIR=LOW）
+    dacVoltage = autoCenter + (autoHalfSpan * pwmRatio);
   }
 
-  if (!autoControlActive)
-  {
-    float manualOutVoltage = originalSensorVoltage + ((float)functionOffsetCount * FUNCTION_OFFSET_STEP_V);
-    if (manualOutVoltage < DAC_MIN_V) manualOutVoltage = DAC_MIN_V;
-    if (manualOutVoltage > DAC_MAX_V) manualOutVoltage = DAC_MAX_V;
-    dacVoltage = manualOutVoltage;
-    WriteDACVoltage(dacVoltage);
-    return;
-  }
-
-  float step = (float)pwmValue * DAC_STEP_GAIN;
-  if (!dacPositiveRaisesVoltage) step = -step;
-
-  dacVoltage += step;
-
-  if (dacVoltage < DAC_MIN_V) dacVoltage = DAC_MIN_V;
-  if (dacVoltage > DAC_MAX_V) dacVoltage = DAC_MAX_V;
+  if (dacVoltage < DAC_AUTO_MIN_V) dacVoltage = DAC_AUTO_MIN_V;
+  if (dacVoltage > DAC_AUTO_MAX_V) dacVoltage = DAC_AUTO_MAX_V;
 
   WriteDACVoltage(dacVoltage);
 }
