@@ -30,8 +30,8 @@
    D6  : オフセット下げボタン（GNDで有効）
    D7  : Work/Auto スイッチ（GNDで有効）
    D8  : 機能ボタン1（同期/復帰トグル、GNDで有効）
-   D10 : 機能ボタン2（予備、GNDで有効）
-   D11 : 機能ボタン3（予備、GNDで有効）
+   D10 : 機能ボタン2（ちょい上げ、GNDで有効）
+   D11 : 機能ボタン3（ちょい下げ、GNDで有効）
    D12 : センサーモード切替入力（LOW=Nano/DAC側）
 
    [アナログ]
@@ -786,6 +786,63 @@ byte IsOriginalSignalAvailable(void)
   return originalSignalPresent;
 }
 
+void HandleFunctionOffsetButtons(void)
+{
+  // オリジナル信号が有効な時のみ機能
+  if (!IsOriginalSignalAvailable())
+  {
+    functionBtn2PrevDebounced = functionBtn2Debounced;
+    functionBtn3PrevDebounced = functionBtn3Debounced;
+    return;
+  }
+
+  // D10: +1カウント（押下1回で1カウント）
+  if (functionBtn2Debounced == LOW && functionBtn2PrevDebounced == HIGH)
+  {
+    functionOffsetCount++;
+  }
+
+  // D11: -1カウント（押下1回で1カウント）
+  if (functionBtn3Debounced == LOW && functionBtn3PrevDebounced == HIGH)
+  {
+    functionOffsetCount--;
+  }
+
+  functionBtn2PrevDebounced = functionBtn2Debounced;
+  functionBtn3PrevDebounced = functionBtn3Debounced;
+}
+
+byte IsOriginalSignalAvailable(void)
+{
+  return originalSignalPresent;
+}
+
+void HandleFunctionOffsetButtons(void)
+{
+  // D7 が HIGH（無効/手動）時のみ有効
+  if (digitalRead(WORKSW_PIN) != HIGH)
+  {
+    functionBtn2PrevDebounced = functionBtn2Debounced;
+    functionBtn3PrevDebounced = functionBtn3Debounced;
+    return;
+  }
+
+  // D10: +1カウント（押下1回で1カウント）
+  if (functionBtn2Debounced == LOW && functionBtn2PrevDebounced == HIGH)
+  {
+    functionOffsetCount++;
+  }
+
+  // D11: -1カウント（押下1回で1カウント）
+  if (functionBtn3Debounced == LOW && functionBtn3PrevDebounced == HIGH)
+  {
+    functionOffsetCount--;
+  }
+
+  functionBtn2PrevDebounced = functionBtn2Debounced;
+  functionBtn3PrevDebounced = functionBtn3Debounced;
+}
+
 float CalcTransitionStepVoltage(float fromVoltage, float toVoltage)
 {
   const float loopTimeSec = (float)LOOP_TIME / 1000.0;
@@ -837,6 +894,16 @@ void UpdateDACFromPWM(void)
     if (dacVoltage < DAC_MIN_V) dacVoltage = DAC_MIN_V;
     if (dacVoltage > DAC_MAX_V) dacVoltage = DAC_MAX_V;
 
+    WriteDACVoltage(dacVoltage);
+    return;
+  }
+
+  if (!autoControlActive)
+  {
+    float manualOutVoltage = originalSensorVoltage + ((float)functionOffsetCount * FUNCTION_OFFSET_STEP_V);
+    if (manualOutVoltage < DAC_MIN_V) manualOutVoltage = DAC_MIN_V;
+    if (manualOutVoltage > DAC_MAX_V) manualOutVoltage = DAC_MAX_V;
+    dacVoltage = manualOutVoltage;
     WriteDACVoltage(dacVoltage);
     return;
   }
