@@ -1,0 +1,28 @@
+name: Arduino Build
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: コードを取得
+        uses: actions/checkout@v4
+
+      - name: arduino-cli を入れる
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | sh
+          sudo mv bin/arduino-cli /usr/local/bin/
+
+      - name: Arduino設定
+        run: |
+          arduino-cli config init
+          arduino-cli core update-index
+          arduino-cli core install arduino:avr
+
+      - name: コンパイル
+        run: |
+          arduino-cli compile --fqbn arduino:avr:nano .
