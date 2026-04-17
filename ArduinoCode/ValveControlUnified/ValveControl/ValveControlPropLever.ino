@@ -494,14 +494,23 @@ void loop()
   }
 
   //Data Header has been found.
-  // OpenGrade(このリポジトリ実装)は PGN 32762 の後に cutValve 1byte のみ送信する。
-  // ここで追加byteを読みに行くと、次フレームのヘッダ(127,250 など)を誤って
-  // 消費して同期が崩れ、機能ボタン/DAC関連処理まで巻き込んで停止することがある。
-  // そのため、ここでは cutValve のみを確実に読む。
+  // cutValve(必須1byte)を読んだ後、旧実装の拡張ペイロード(最大5byte)があれば
+  // 読み捨てる。ただし次フレームの先頭(127)が見えたらそこで停止してヘッダを守る。
+  // これにより:
+  // - 1byteペイロード実装: 次ヘッダ誤消費を防止
+  // - 6byteペイロード実装: 余剰5byteを排出して同期維持
   if (Serial.available() > 0 && isDataFound)
   {
     isDataFound = false;
     cutValve = Serial.read();
+
+    // Optional payload bytes compatibility (bladeOffsetIn + optOut1..4)
+    // 先頭が 127 の場合は次パケットヘッダの可能性が高いので消費しない。
+    for (byte i = 0; i < 5 && Serial.available() > 0; i++)
+    {
+      if (Serial.peek() == 127) break;
+      Serial.read();
+    }
 
     //reset watchdog
     watchdogTimer = 0;
