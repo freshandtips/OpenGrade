@@ -69,6 +69,10 @@ bool workButton = true; // true for momentary button, false for switch(continus)
 bool manualMovePropLever = true; //if a lever for manual operation is installed
 bool invertManMove = false;
 bool manualMoveBtn = false;
+// A1レバーでAutoEnableを強制ON/OFFするかどうか。
+// false: D7(Work/Auto)でのみAutoEnableを切替（A1未配線でも安定）
+// true : 従来挙動（A1閾値でAutoEnableを制御）
+bool useLeverForAutoEnable = false;
 #define LEVER_UP A1 // first axle
 #define BMANUP_PIN A7 //manualMoveBtn=true時のみ使用（外付けプルアップ前提）
 #define BMANDW_PIN 13 //manualMoveBtn=true時のみ使用
@@ -577,8 +581,11 @@ void loop()
 void SetPWM(void)
 {
   if (workSwitch == 1) autoEnable = 1; // if auto switch is tourned off turn on AutoEnable for the next time auto switch will be turned on
-  if (LeverUpValue < 480) autoEnable = 0; //turn off automode when lifting the blade
-  if (LeverUpValue > 1000) autoEnable = 1; // tur on automode when lever is fully presed for lowering the blade
+  if (useLeverForAutoEnable)
+  {
+    if (LeverUpValue < 480) autoEnable = 0; //turn off automode when lifting the blade
+    if (LeverUpValue > 1000) autoEnable = 1; // tur on automode when lever is fully presed for lowering the blade
+  }
 
   pwmValue = 0;
 
