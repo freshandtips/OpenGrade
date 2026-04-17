@@ -69,6 +69,10 @@ bool workButton = true; // true for momentary button, false for switch(continus)
 bool manualMovePropLever = true; //if a lever for manual operation is installed
 bool invertManMove = false;
 bool manualMoveBtn = false;
+// A1レバーでAutoEnableを強制ON/OFFするかどうか。
+// false: D7(Work/Auto)でのみAutoEnableを切替（A1未配線でも安定）
+// true : 従来挙動（A1閾値でAutoEnableを制御）
+bool useLeverForAutoEnable = false;
 #define LEVER_UP A1 // first axle
 #define BMANUP_PIN A7 //manualMoveBtn=true時のみ使用（外付けプルアップ前提）
 #define BMANDW_PIN 13 //manualMoveBtn=true時のみ使用
@@ -89,7 +93,8 @@ bool bladeOffsetBtn = false; // true if this fonctionality is used
 
 //DAC + original sensor monitor
 Adafruit_MCP4725 dac;
-#define DAC_I2C_ADDR 0x62
+#define DAC_I2C_ADDR_PRIMARY 0x60   // MCP4725 default address
+#define DAC_I2C_ADDR_FALLBACK 0x62  // fallback for alternate wiring
 #define TRACTOR_SENSOR_IN A3 //original tractor sensor voltage monitor
 #define SENSOR_MODE_SWITCH_PIN 12 //manual switch status input (LOW = DAC side selected)
 #define FUNCTION_BTN_SYNC_PIN 8 // function button 1 (active LOW with INPUT_PULLUP)
@@ -105,6 +110,16 @@ bool syncDacToOriginalOnAutoEntry = true;
 float dacVoltage = 1.50;
 bool sendOriginalSensorRawInTelemetry = false; // keep old telemetry layout by default
 bool functionButtonEnabled = true;
+// 現場配線に合わせたゲート設定
+// false: D12未配線でもAuto DAC制御を有効化（D3/D4追従）
+// true : D12=LOW時のみAuto DAC制御
+bool requireSensorModeSwitchLowForAutoControl = false;
+// false: A3原信号なしでもD8/D10/D11を有効化
+// true : A3原信号が有効時のみ機能ボタンを有効化
+bool requireOriginalSignalForFunctionButtons = false;
+// false: Auto中でもD10/D11を有効化
+// true : Auto中はD10/D11を無効化（従来）
+bool disableOffsetButtonsWhileAuto = false;
 float functionSyncVoltage = 1.80; // destination voltage on first function-button press
 const float FUNCTION_TRANSITION_TIME_SEC = 2.0; // seconds to reach target or return voltage
 /* ------------------------------------------------------------
@@ -146,10 +161,10 @@ const float ORIGINAL_SIGNAL_PRESENT_MAX_V = 4.90f;
    - DIR=HIGH : 中心から下側へ（電圧下降）
 
    調整ポイント:
-   - DAC_AUTO_MIN_V / DAC_AUTO_MAX_V を変更すると自動時の出力幅を変更可能
+   - AUTO_OUTPUT_MIN_V / AUTO_OUTPUT_MAX_V を変更すると自動時の出力幅を変更可能
    ------------------------------------------------------------ */
-const float DAC_AUTO_MIN_V = 0.50f;
-const float DAC_AUTO_MAX_V = 1.60f;
+float AUTO_OUTPUT_MIN_V = 0.50f;  // D7 Auto後のMCP出力 下限[V]
+float AUTO_OUTPUT_MAX_V = 1.60f;  // D7 Auto後のMCP出力 上限[V]
 bool useMcpOutMonitorForFunctionButton = true; // D7 auto-on後のD8基準をA3ではなくMCP OUT監視値にする
 
 
@@ -219,6 +234,7 @@ byte sensorModeSwitchLastRaw = HIGH;
 unsigned long sensorModeSwitchLastChange = 0;
 const byte SENSOR_MODE_DEBOUNCE_MS = 25;
 bool dacReady = false;
+byte dacI2cAddrInUse = 0;
 byte functionBtnDebounced = HIGH;
 byte functionBtnLastRaw = HIGH;
 byte functionBtnPrevDebounced = HIGH;
@@ -310,7 +326,13 @@ void setup()
 
   ReadFromEEPROM();// read saved settings
   Wire.begin();
-  dacReady = dac.begin(DAC_I2C_ADDR);
+  dacReady = dac.begin(DAC_I2C_ADDR_PRIMARY);
+  if (dacReady) dacI2cAddrInUse = DAC_I2C_ADDR_PRIMARY;
+  else
+  {
+    dacReady = dac.begin(DAC_I2C_ADDR_FALLBACK);
+    if (dacReady) dacI2cAddrInUse = DAC_I2C_ADDR_FALLBACK;
+  }
   if (dacReady) WriteDACVoltage(dacVoltage);
 
 }
@@ -493,16 +515,24 @@ void loop()
     if (header == 32760) isSettingFound = true;        //Do we have a match?
   }
 
-  //Data Header has been found, so the next 6 bytes are the data
-  if (Serial.available() > 5 && isDataFound)
+  //Data Header has been found.
+  // cutValve(必須1byte)を読んだ後、旧実装の拡張ペイロード(最大5byte)があれば
+  // 読み捨てる。ただし次フレームの先頭(127)が見えたらそこで停止してヘッダを守る。
+  // これにより:
+  // - 1byteペイロード実装: 次ヘッダ誤消費を防止
+  // - 6byteペイロード実装: 余剰5byteを排出して同期維持
+  if (Serial.available() > 0 && isDataFound)
   {
     isDataFound = false;
     cutValve = Serial.read();
-    bladeOffsetIn = Serial.read(); //bladeOffset value in opengrade 100 mean 0 offset.
-    Serial.read(); //optOut1
-    Serial.read(); //optOut2
-    Serial.read(); //optOut3
-    Serial.read(); //optOut4
+
+    // Optional payload bytes compatibility (bladeOffsetIn + optOut1..4)
+    // 先頭が 127 の場合は次パケットヘッダの可能性が高いので消費しない。
+    for (byte i = 0; i < 5 && Serial.available() > 0; i++)
+    {
+      if (Serial.peek() == 127) break;
+      Serial.read();
+    }
 
     //reset watchdog
     watchdogTimer = 0;
@@ -569,8 +599,11 @@ void loop()
 void SetPWM(void)
 {
   if (workSwitch == 1) autoEnable = 1; // if auto switch is tourned off turn on AutoEnable for the next time auto switch will be turned on
-  if (LeverUpValue < 480) autoEnable = 0; //turn off automode when lifting the blade
-  if (LeverUpValue > 1000) autoEnable = 1; // tur on automode when lever is fully presed for lowering the blade
+  if (useLeverForAutoEnable)
+  {
+    if (LeverUpValue < 480) autoEnable = 0; //turn off automode when lifting the blade
+    if (LeverUpValue > 1000) autoEnable = 1; // tur on automode when lever is fully presed for lowering the blade
+  }
 
   pwmValue = 0;
 
@@ -763,7 +796,7 @@ void HandleFunctionButtonPress(byte autoControlActive)
     return;
   }
 
-  if (!originalSignalPresent && !mcpOutMonitorPresent)
+  if (requireOriginalSignalForFunctionButtons && !originalSignalPresent && !mcpOutMonitorPresent)
   {
     functionBtnPrevDebounced = functionBtnDebounced;
     return;
@@ -798,7 +831,7 @@ void HandleFunctionButtonPress(byte autoControlActive)
 void HandleOffsetButtonsByOriginalSignal(void)
 {
   // D7を押してAuto中はD10/D11を無効化
-  if (workSwitch == 0)
+  if (disableOffsetButtonsWhileAuto && workSwitch == 0)
   {
     functionBtn2PrevDebounced = functionBtn2Debounced;
     functionBtn3PrevDebounced = functionBtn3Debounced;
@@ -806,7 +839,7 @@ void HandleOffsetButtonsByOriginalSignal(void)
   }
 
   // オリジナル信号が有効な時のみ機能
-  if (!originalSignalPresent)
+  if (requireOriginalSignalForFunctionButtons && !originalSignalPresent)
   {
     functionBtn2PrevDebounced = functionBtn2Debounced;
     functionBtn3PrevDebounced = functionBtn3Debounced;
@@ -853,7 +886,11 @@ byte MoveDacToward(float targetVoltage, float stepVoltage)
 
 byte IsAutoControlActive(void)
 {
-  return (workSwitch == 0 && autoEnable == 1 && sensorModeSwitchDebounced == LOW);
+  if (requireSensorModeSwitchLowForAutoControl)
+  {
+    return (workSwitch == 0 && autoEnable == 1 && sensorModeSwitchDebounced == LOW);
+  }
+  return (workSwitch == 0 && autoEnable == 1);
 }
 
 void UpdateDACFromPWM(void)
@@ -899,8 +936,19 @@ void UpdateDACFromPWM(void)
   if (pwmRatio < 0.0) pwmRatio = 0.0;
   if (pwmRatio > 1.0) pwmRatio = 1.0;
 
-  float autoCenter = (DAC_AUTO_MIN_V + DAC_AUTO_MAX_V) * 0.5;
-  float autoHalfSpan = (DAC_AUTO_MAX_V - DAC_AUTO_MIN_V) * 0.5;
+  float autoMinV = AUTO_OUTPUT_MIN_V;
+  float autoMaxV = AUTO_OUTPUT_MAX_V;
+  if (autoMinV < DAC_MIN_V) autoMinV = DAC_MIN_V;
+  if (autoMaxV > DAC_MAX_V) autoMaxV = DAC_MAX_V;
+  if (autoMaxV < autoMinV)
+  {
+    float tmp = autoMinV;
+    autoMinV = autoMaxV;
+    autoMaxV = tmp;
+  }
+
+  float autoCenter = (autoMinV + autoMaxV) * 0.5;
+  float autoHalfSpan = (autoMaxV - autoMinV) * 0.5;
   byte dirState = digitalRead(DIR_ENABLE);
 
   if (pwmDrive == 0)
@@ -918,8 +966,8 @@ void UpdateDACFromPWM(void)
     dacVoltage = autoCenter + (autoHalfSpan * pwmRatio);
   }
 
-  if (dacVoltage < DAC_AUTO_MIN_V) dacVoltage = DAC_AUTO_MIN_V;
-  if (dacVoltage > DAC_AUTO_MAX_V) dacVoltage = DAC_AUTO_MAX_V;
+  if (dacVoltage < autoMinV) dacVoltage = autoMinV;
+  if (dacVoltage > autoMaxV) dacVoltage = autoMaxV;
 
   WriteDACVoltage(dacVoltage);
 }
