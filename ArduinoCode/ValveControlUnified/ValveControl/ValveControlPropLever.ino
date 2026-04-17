@@ -109,6 +109,16 @@ bool syncDacToOriginalOnAutoEntry = true;
 float dacVoltage = 1.50;
 bool sendOriginalSensorRawInTelemetry = false; // keep old telemetry layout by default
 bool functionButtonEnabled = true;
+// 現場配線に合わせたゲート設定
+// false: D12未配線でもAuto DAC制御を有効化（D3/D4追従）
+// true : D12=LOW時のみAuto DAC制御
+bool requireSensorModeSwitchLowForAutoControl = false;
+// false: A3原信号なしでもD8/D10/D11を有効化
+// true : A3原信号が有効時のみ機能ボタンを有効化
+bool requireOriginalSignalForFunctionButtons = false;
+// false: Auto中でもD10/D11を有効化
+// true : Auto中はD10/D11を無効化（従来）
+bool disableOffsetButtonsWhileAuto = false;
 float functionSyncVoltage = 1.80; // destination voltage on first function-button press
 const float FUNCTION_TRANSITION_TIME_SEC = 2.0; // seconds to reach target or return voltage
 /* ------------------------------------------------------------
@@ -778,7 +788,7 @@ void HandleFunctionButtonPress(byte autoControlActive)
     return;
   }
 
-  if (!originalSignalPresent && !mcpOutMonitorPresent)
+  if (requireOriginalSignalForFunctionButtons && !originalSignalPresent && !mcpOutMonitorPresent)
   {
     functionBtnPrevDebounced = functionBtnDebounced;
     return;
@@ -813,7 +823,7 @@ void HandleFunctionButtonPress(byte autoControlActive)
 void HandleOffsetButtonsByOriginalSignal(void)
 {
   // D7を押してAuto中はD10/D11を無効化
-  if (workSwitch == 0)
+  if (disableOffsetButtonsWhileAuto && workSwitch == 0)
   {
     functionBtn2PrevDebounced = functionBtn2Debounced;
     functionBtn3PrevDebounced = functionBtn3Debounced;
@@ -821,7 +831,7 @@ void HandleOffsetButtonsByOriginalSignal(void)
   }
 
   // オリジナル信号が有効な時のみ機能
-  if (!originalSignalPresent)
+  if (requireOriginalSignalForFunctionButtons && !originalSignalPresent)
   {
     functionBtn2PrevDebounced = functionBtn2Debounced;
     functionBtn3PrevDebounced = functionBtn3Debounced;
@@ -868,7 +878,11 @@ byte MoveDacToward(float targetVoltage, float stepVoltage)
 
 byte IsAutoControlActive(void)
 {
-  return (workSwitch == 0 && autoEnable == 1 && sensorModeSwitchDebounced == LOW);
+  if (requireSensorModeSwitchLowForAutoControl)
+  {
+    return (workSwitch == 0 && autoEnable == 1 && sensorModeSwitchDebounced == LOW);
+  }
+  return (workSwitch == 0 && autoEnable == 1);
 }
 
 void UpdateDACFromPWM(void)
