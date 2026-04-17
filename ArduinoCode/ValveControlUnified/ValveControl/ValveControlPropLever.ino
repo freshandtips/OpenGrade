@@ -493,16 +493,23 @@ void loop()
     if (header == 32760) isSettingFound = true;        //Do we have a match?
   }
 
-  //Data Header has been found, so the next 6 bytes are the data
-  if (Serial.available() > 5 && isDataFound)
+  //Data Header has been found.
+  // OpenGrade側の実装差分に対応:
+  // - 従来: header後に6byte(cutValve, bladeOffsetIn, optOut1..4)
+  // - 一部実装: header後に1byte(cutValve)のみ
+  // どちらでも受信停止しないよう、最低1byteで処理し、
+  // 追加byteが来ていれば順次読み捨て/反映する。
+  if (Serial.available() > 0 && isDataFound)
   {
     isDataFound = false;
     cutValve = Serial.read();
-    bladeOffsetIn = Serial.read(); //bladeOffset value in opengrade 100 mean 0 offset.
-    Serial.read(); //optOut1
-    Serial.read(); //optOut2
-    Serial.read(); //optOut3
-    Serial.read(); //optOut4
+
+    // Optional payload bytes (互換対応)
+    if (Serial.available() > 0) bladeOffsetIn = Serial.read(); //bladeOffset value in opengrade 100 mean 0 offset.
+    if (Serial.available() > 0) Serial.read(); //optOut1
+    if (Serial.available() > 0) Serial.read(); //optOut2
+    if (Serial.available() > 0) Serial.read(); //optOut3
+    if (Serial.available() > 0) Serial.read(); //optOut4
 
     //reset watchdog
     watchdogTimer = 0;
