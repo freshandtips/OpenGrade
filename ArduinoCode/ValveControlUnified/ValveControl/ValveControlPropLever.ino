@@ -118,8 +118,8 @@ bool requireSensorModeSwitchLowForAutoControl = false;
 // true : A3原信号が有効時のみ機能ボタンを有効化
 bool requireOriginalSignalForFunctionButtons = false;
 // false: Auto中でもD10/D11を有効化
-// true : Auto中はD10/D11を無効化（従来）
-bool disableOffsetButtonsWhileAuto = false;
+// true : Auto中はD10/D11を無効化（安全優先）
+bool disableOffsetButtonsWhileAuto = true;
 float functionSyncVoltage = 1.80; // destination voltage on first function-button press
 const float FUNCTION_TRANSITION_TIME_SEC = 2.0; // seconds to reach target or return voltage
 /* ------------------------------------------------------------
@@ -903,7 +903,17 @@ void UpdateDACFromPWM(void)
 
   if (autoControlActive && !prevAutoControlActive && syncDacToOriginalOnAutoEntry)
   {
+    // Autoへ入る時は手動オフセットをクリアして基準を合わせる
+    functionOffsetCount = 0;
     dacVoltage = ReadOriginalSensorVoltageAveraged();
+  }
+  else if (!autoControlActive && prevAutoControlActive)
+  {
+    // Autoから手動へ戻る時もオフセットをクリアし、
+    // MCP OUTがA3の原信号へ即座に追従するようにする
+    functionOffsetCount = 0;
+    functionHoldActive = false;
+    functionReturnActive = false;
   }
   prevAutoControlActive = autoControlActive;
 
