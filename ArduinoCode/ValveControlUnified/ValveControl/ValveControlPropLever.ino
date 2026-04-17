@@ -93,7 +93,8 @@ bool bladeOffsetBtn = false; // true if this fonctionality is used
 
 //DAC + original sensor monitor
 Adafruit_MCP4725 dac;
-#define DAC_I2C_ADDR 0x62
+#define DAC_I2C_ADDR_PRIMARY 0x60   // MCP4725 default address
+#define DAC_I2C_ADDR_FALLBACK 0x62  // fallback for alternate wiring
 #define TRACTOR_SENSOR_IN A3 //original tractor sensor voltage monitor
 #define SENSOR_MODE_SWITCH_PIN 12 //manual switch status input (LOW = DAC side selected)
 #define FUNCTION_BTN_SYNC_PIN 8 // function button 1 (active LOW with INPUT_PULLUP)
@@ -160,10 +161,10 @@ const float ORIGINAL_SIGNAL_PRESENT_MAX_V = 4.90f;
    - DIR=HIGH : 中心から下側へ（電圧下降）
 
    調整ポイント:
-   - DAC_AUTO_MIN_V / DAC_AUTO_MAX_V を変更すると自動時の出力幅を変更可能
+   - AUTO_OUTPUT_MIN_V / AUTO_OUTPUT_MAX_V を変更すると自動時の出力幅を変更可能
    ------------------------------------------------------------ */
-const float DAC_AUTO_MIN_V = 0.50f;
-const float DAC_AUTO_MAX_V = 1.60f;
+float AUTO_OUTPUT_MIN_V = 0.50f;  // D7 Auto後のMCP出力 下限[V]
+float AUTO_OUTPUT_MAX_V = 1.60f;  // D7 Auto後のMCP出力 上限[V]
 bool useMcpOutMonitorForFunctionButton = true; // D7 auto-on後のD8基準をA3ではなくMCP OUT監視値にする
 
 
@@ -233,6 +234,7 @@ byte sensorModeSwitchLastRaw = HIGH;
 unsigned long sensorModeSwitchLastChange = 0;
 const byte SENSOR_MODE_DEBOUNCE_MS = 25;
 bool dacReady = false;
+byte dacI2cAddrInUse = 0;
 byte functionBtnDebounced = HIGH;
 byte functionBtnLastRaw = HIGH;
 byte functionBtnPrevDebounced = HIGH;
@@ -324,7 +326,13 @@ void setup()
 
   ReadFromEEPROM();// read saved settings
   Wire.begin();
-  dacReady = dac.begin(DAC_I2C_ADDR);
+  dacReady = dac.begin(DAC_I2C_ADDR_PRIMARY);
+  if (dacReady) dacI2cAddrInUse = DAC_I2C_ADDR_PRIMARY;
+  else
+  {
+    dacReady = dac.begin(DAC_I2C_ADDR_FALLBACK);
+    if (dacReady) dacI2cAddrInUse = DAC_I2C_ADDR_FALLBACK;
+  }
   if (dacReady) WriteDACVoltage(dacVoltage);
 
 }
@@ -928,8 +936,19 @@ void UpdateDACFromPWM(void)
   if (pwmRatio < 0.0) pwmRatio = 0.0;
   if (pwmRatio > 1.0) pwmRatio = 1.0;
 
-  float autoCenter = (DAC_AUTO_MIN_V + DAC_AUTO_MAX_V) * 0.5;
-  float autoHalfSpan = (DAC_AUTO_MAX_V - DAC_AUTO_MIN_V) * 0.5;
+  float autoMinV = AUTO_OUTPUT_MIN_V;
+  float autoMaxV = AUTO_OUTPUT_MAX_V;
+  if (autoMinV < DAC_MIN_V) autoMinV = DAC_MIN_V;
+  if (autoMaxV > DAC_MAX_V) autoMaxV = DAC_MAX_V;
+  if (autoMaxV < autoMinV)
+  {
+    float tmp = autoMinV;
+    autoMinV = autoMaxV;
+    autoMaxV = tmp;
+  }
+
+  float autoCenter = (autoMinV + autoMaxV) * 0.5;
+  float autoHalfSpan = (autoMaxV - autoMinV) * 0.5;
   byte dirState = digitalRead(DIR_ENABLE);
 
   if (pwmDrive == 0)
@@ -947,8 +966,8 @@ void UpdateDACFromPWM(void)
     dacVoltage = autoCenter + (autoHalfSpan * pwmRatio);
   }
 
-  if (dacVoltage < DAC_AUTO_MIN_V) dacVoltage = DAC_AUTO_MIN_V;
-  if (dacVoltage > DAC_AUTO_MAX_V) dacVoltage = DAC_AUTO_MAX_V;
+  if (dacVoltage < autoMinV) dacVoltage = autoMinV;
+  if (dacVoltage > autoMaxV) dacVoltage = autoMaxV;
 
   WriteDACVoltage(dacVoltage);
 }
