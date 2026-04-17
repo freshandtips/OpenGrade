@@ -494,22 +494,14 @@ void loop()
   }
 
   //Data Header has been found.
-  // OpenGrade側の実装差分に対応:
-  // - 従来: header後に6byte(cutValve, bladeOffsetIn, optOut1..4)
-  // - 一部実装: header後に1byte(cutValve)のみ
-  // どちらでも受信停止しないよう、最低1byteで処理し、
-  // 追加byteが来ていれば順次読み捨て/反映する。
+  // OpenGrade(このリポジトリ実装)は PGN 32762 の後に cutValve 1byte のみ送信する。
+  // ここで追加byteを読みに行くと、次フレームのヘッダ(127,250 など)を誤って
+  // 消費して同期が崩れ、機能ボタン/DAC関連処理まで巻き込んで停止することがある。
+  // そのため、ここでは cutValve のみを確実に読む。
   if (Serial.available() > 0 && isDataFound)
   {
     isDataFound = false;
     cutValve = Serial.read();
-
-    // Optional payload bytes (互換対応)
-    if (Serial.available() > 0) bladeOffsetIn = Serial.read(); //bladeOffset value in opengrade 100 mean 0 offset.
-    if (Serial.available() > 0) Serial.read(); //optOut1
-    if (Serial.available() > 0) Serial.read(); //optOut2
-    if (Serial.available() > 0) Serial.read(); //optOut3
-    if (Serial.available() > 0) Serial.read(); //optOut4
 
     //reset watchdog
     watchdogTimer = 0;
