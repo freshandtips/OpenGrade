@@ -69,6 +69,10 @@ bool workButton = true; // true for momentary button, false for switch(continus)
 bool manualMovePropLever = true; //if a lever for manual operation is installed
 bool invertManMove = false;
 bool manualMoveBtn = false;
+// A1レバーでAutoEnableを強制ON/OFFするかどうか。
+// false: D7(Work/Auto)でのみAutoEnableを切替（A1未配線でも安定）
+// true : 従来挙動（A1閾値でAutoEnableを制御）
+bool useLeverForAutoEnable = false;
 #define LEVER_UP A1 // first axle
 #define BMANUP_PIN A7 //manualMoveBtn=true時のみ使用（外付けプルアップ前提）
 #define BMANDW_PIN 13 //manualMoveBtn=true時のみ使用
@@ -105,6 +109,16 @@ bool syncDacToOriginalOnAutoEntry = true;
 float dacVoltage = 1.50;
 bool sendOriginalSensorRawInTelemetry = false; // keep old telemetry layout by default
 bool functionButtonEnabled = true;
+// 現場配線に合わせたゲート設定
+// false: D12未配線でもAuto DAC制御を有効化（D3/D4追従）
+// true : D12=LOW時のみAuto DAC制御
+bool requireSensorModeSwitchLowForAutoControl = false;
+// false: A3原信号なしでもD8/D10/D11を有効化
+// true : A3原信号が有効時のみ機能ボタンを有効化
+bool requireOriginalSignalForFunctionButtons = false;
+// false: Auto中でもD10/D11を有効化
+// true : Auto中はD10/D11を無効化（従来）
+bool disableOffsetButtonsWhileAuto = false;
 float functionSyncVoltage = 1.80; // destination voltage on first function-button press
 const float FUNCTION_TRANSITION_TIME_SEC = 2.0; // seconds to reach target or return voltage
 /* ------------------------------------------------------------
@@ -493,16 +507,24 @@ void loop()
     if (header == 32760) isSettingFound = true;        //Do we have a match?
   }
 
-  //Data Header has been found, so the next 6 bytes are the data
-  if (Serial.available() > 5 && isDataFound)
+  //Data Header has been found.
+  // cutValve(必須1byte)を読んだ後、旧実装の拡張ペイロード(最大5byte)があれば
+  // 読み捨てる。ただし次フレームの先頭(127)が見えたらそこで停止してヘッダを守る。
+  // これにより:
+  // - 1byteペイロード実装: 次ヘッダ誤消費を防止
+  // - 6byteペイロード実装: 余剰5byteを排出して同期維持
+  if (Serial.available() > 0 && isDataFound)
   {
     isDataFound = false;
     cutValve = Serial.read();
-    bladeOffsetIn = Serial.read(); //bladeOffset value in opengrade 100 mean 0 offset.
-    Serial.read(); //optOut1
-    Serial.read(); //optOut2
-    Serial.read(); //optOut3
-    Serial.read(); //optOut4
+
+    // Optional payload bytes compatibility (bladeOffsetIn + optOut1..4)
+    // 先頭が 127 の場合は次パケットヘッダの可能性が高いので消費しない。
+    for (byte i = 0; i < 5 && Serial.available() > 0; i++)
+    {
+      if (Serial.peek() == 127) break;
+      Serial.read();
+    }
 
     //reset watchdog
     watchdogTimer = 0;
@@ -569,8 +591,11 @@ void loop()
 void SetPWM(void)
 {
   if (workSwitch == 1) autoEnable = 1; // if auto switch is tourned off turn on AutoEnable for the next time auto switch will be turned on
-  if (LeverUpValue < 480) autoEnable = 0; //turn off automode when lifting the blade
-  if (LeverUpValue > 1000) autoEnable = 1; // tur on automode when lever is fully presed for lowering the blade
+  if (useLeverForAutoEnable)
+  {
+    if (LeverUpValue < 480) autoEnable = 0; //turn off automode when lifting the blade
+    if (LeverUpValue > 1000) autoEnable = 1; // tur on automode when lever is fully presed for lowering the blade
+  }
 
   pwmValue = 0;
 
@@ -763,7 +788,7 @@ void HandleFunctionButtonPress(byte autoControlActive)
     return;
   }
 
-  if (!originalSignalPresent && !mcpOutMonitorPresent)
+  if (requireOriginalSignalForFunctionButtons && !originalSignalPresent && !mcpOutMonitorPresent)
   {
     functionBtnPrevDebounced = functionBtnDebounced;
     return;
@@ -798,7 +823,7 @@ void HandleFunctionButtonPress(byte autoControlActive)
 void HandleOffsetButtonsByOriginalSignal(void)
 {
   // D7を押してAuto中はD10/D11を無効化
-  if (workSwitch == 0)
+  if (disableOffsetButtonsWhileAuto && workSwitch == 0)
   {
     functionBtn2PrevDebounced = functionBtn2Debounced;
     functionBtn3PrevDebounced = functionBtn3Debounced;
@@ -806,7 +831,7 @@ void HandleOffsetButtonsByOriginalSignal(void)
   }
 
   // オリジナル信号が有効な時のみ機能
-  if (!originalSignalPresent)
+  if (requireOriginalSignalForFunctionButtons && !originalSignalPresent)
   {
     functionBtn2PrevDebounced = functionBtn2Debounced;
     functionBtn3PrevDebounced = functionBtn3Debounced;
@@ -853,7 +878,11 @@ byte MoveDacToward(float targetVoltage, float stepVoltage)
 
 byte IsAutoControlActive(void)
 {
-  return (workSwitch == 0 && autoEnable == 1 && sensorModeSwitchDebounced == LOW);
+  if (requireSensorModeSwitchLowForAutoControl)
+  {
+    return (workSwitch == 0 && autoEnable == 1 && sensorModeSwitchDebounced == LOW);
+  }
+  return (workSwitch == 0 && autoEnable == 1);
 }
 
 void UpdateDACFromPWM(void)
