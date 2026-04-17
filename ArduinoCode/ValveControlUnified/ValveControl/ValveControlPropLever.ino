@@ -493,16 +493,15 @@ void loop()
     if (header == 32760) isSettingFound = true;        //Do we have a match?
   }
 
-  //Data Header has been found, so the next 6 bytes are the data
-  if (Serial.available() > 5 && isDataFound)
+  //Data Header has been found.
+  // OpenGrade(このリポジトリ実装)は PGN 32762 の後に cutValve 1byte のみ送信する。
+  // ここで追加byteを読みに行くと、次フレームのヘッダ(127,250 など)を誤って
+  // 消費して同期が崩れ、機能ボタン/DAC関連処理まで巻き込んで停止することがある。
+  // そのため、ここでは cutValve のみを確実に読む。
+  if (Serial.available() > 0 && isDataFound)
   {
     isDataFound = false;
     cutValve = Serial.read();
-    bladeOffsetIn = Serial.read(); //bladeOffset value in opengrade 100 mean 0 offset.
-    Serial.read(); //optOut1
-    Serial.read(); //optOut2
-    Serial.read(); //optOut3
-    Serial.read(); //optOut4
 
     //reset watchdog
     watchdogTimer = 0;
