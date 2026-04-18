@@ -62,7 +62,9 @@ bool proportionalValve = true;
 #define PWM_OUT 3 //PD3  cytron pwm
 
 //workswitch or work button
-bool workButton = true; // true for momentary button, false for switch(continus)
+// false: オルタネイト(保持)スイッチ運用（D7状態をそのまま使用）
+// true : モーメンタリ押しでトグル運用
+bool workButton = false; // true for momentary button, false for switch(continus)
 #define WORKSW_PIN 7  //PD7 this pin must be low (to ground) to activate automode IMP on PCB
 
 //proportional lever
@@ -113,15 +115,15 @@ bool functionButtonEnabled = true;
 // 現場配線に合わせたゲート設定
 // false: D12未配線でもAuto DAC制御を有効化（D3/D4追従）
 // true : D12=LOW時のみAuto DAC制御
-bool requireSensorModeSwitchLowForAutoControl = true;
+bool requireSensorModeSwitchLowForAutoControl = false;
 // false: A3原信号なしでもD8/D10/D11を有効化
 // true : A3原信号が有効時のみ機能ボタンを有効化
-bool requireOriginalSignalForFunctionButtons = true;
+bool requireOriginalSignalForFunctionButtons = false;
 // false: Auto中でもD10/D11を有効化
 // true : Auto中はD10/D11を無効化（安全優先）
 bool disableOffsetButtonsWhileAuto = true;
-float functionSyncVoltage = 1.80; // ポンパ上限設定
-const float FUNCTION_TRANSITION_TIME_SEC = 2.0; // ポンパ動作時間
+float functionSyncVoltage = 1.80; // destination voltage on first function-button press
+const float FUNCTION_TRANSITION_TIME_SEC = 2.0; // seconds to reach target or return voltage
 /* ------------------------------------------------------------
    D10/D11 オフセット機能 設定ガイド（日本語）
    ------------------------------------------------------------
@@ -138,10 +140,14 @@ const float FUNCTION_TRANSITION_TIME_SEC = 2.0; // ポンパ動作時間
    変更ポイント:
    - FUNCTION_OFFSET_STEP_V を変更すると、1カウントあたりの電圧を変えられます。
      例）0.20f なら 1 回押下で ±0.2V
+   - MANUAL_OUTPUT_MIN_V を上げると、D11で下げる側の下限電圧を制限できます。
    ------------------------------------------------------------ */
 float FUNCTION_OFFSET_STEP_V = 0.20f;
+// D11(下げ側オフセット)で下がり過ぎてECUエラーにならないよう、
+// 手動時のMCP出力下限を別設定で制限する
+float MANUAL_OUTPUT_MIN_V = 0.80f;
 const float ORIGINAL_SIGNAL_PRESENT_MIN_V = 0.10f;
-const float ORIGINAL_SIGNAL_PRESENT_MAX_V = 2.90f;
+const float ORIGINAL_SIGNAL_PRESENT_MAX_V = 4.90f;
 /* ------------------------------------------------------------
    Auto時(D7有効)の D3/D4 -> MCP4725 変換設定（日本語）
    ------------------------------------------------------------
@@ -164,7 +170,7 @@ const float ORIGINAL_SIGNAL_PRESENT_MAX_V = 2.90f;
    - AUTO_OUTPUT_MIN_V / AUTO_OUTPUT_MAX_V を変更すると自動時の出力幅を変更可能
    ------------------------------------------------------------ */
 float AUTO_OUTPUT_MIN_V = 0.50f;  // D7 Auto後のMCP出力 下限[V]
-float AUTO_OUTPUT_MAX_V = 1.80f;  // D7 Auto後のMCP出力 上限[V]
+float AUTO_OUTPUT_MAX_V = 1.60f;  // D7 Auto後のMCP出力 上限[V]
 bool useMcpOutMonitorForFunctionButton = true; // D7 auto-on後のD8基準をA3ではなくMCP OUT監視値にする
 
 
@@ -934,7 +940,10 @@ void UpdateDACFromPWM(void)
   if (!autoControlActive)
   {
     float manualOutVoltage = originalSensorVoltage + ((float)functionOffsetCount * FUNCTION_OFFSET_STEP_V);
-    if (manualOutVoltage < DAC_MIN_V) manualOutVoltage = DAC_MIN_V;
+    float manualMinV = MANUAL_OUTPUT_MIN_V;
+    if (manualMinV < DAC_MIN_V) manualMinV = DAC_MIN_V;
+    if (manualMinV > DAC_MAX_V) manualMinV = DAC_MAX_V;
+    if (manualOutVoltage < manualMinV) manualOutVoltage = manualMinV;
     if (manualOutVoltage > DAC_MAX_V) manualOutVoltage = DAC_MAX_V;
     dacVoltage = manualOutVoltage;
     WriteDACVoltage(dacVoltage);
