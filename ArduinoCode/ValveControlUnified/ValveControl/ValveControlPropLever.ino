@@ -111,7 +111,7 @@ bool dacPositiveRaisesVoltage = true;
 bool syncDacToOriginalOnAutoEntry = true;
 float dacVoltage = 1.50;
 bool sendOriginalSensorRawInTelemetry = false; // keep old telemetry layout by default
-bool functionButtonEnabled = true;
+bool functionButtonEnabled = false;
 // 現場配線に合わせたゲート設定
 // false: D12未配線でもAuto DAC制御を有効化（D3/D4追従）
 // true : D12=LOW時のみAuto DAC制御
