@@ -104,8 +104,8 @@ Adafruit_MCP4725 dac;
 #define FUNCTION_BTN_3_PIN 11 // function button 3 (-offset)
 #define MCP_OUT_MONITOR_PIN A6 // MCP OUT monitor input (for D8 priority control after D7 auto-on)
 const float ADC_REF_V = 5.0;
-const float DAC_MIN_V = 0.55;
-const float DAC_MAX_V = 2.95;
+const float DAC_MIN_V = 1.05;
+const float DAC_MAX_V = 2.90;
 const float DAC_STEP_GAIN = 0.0020;
 bool dacPositiveRaisesVoltage = true;
 bool syncDacToOriginalOnAutoEntry = true;
@@ -115,14 +115,14 @@ bool functionButtonEnabled = true;
 // 現場配線に合わせたゲート設定
 // false: D12未配線でもAuto DAC制御を有効化（D3/D4追従）
 // true : D12=LOW時のみAuto DAC制御
-bool requireSensorModeSwitchLowForAutoControl = false;
+bool requireSensorModeSwitchLowForAutoControl = true;
 // false: A3原信号なしでもD8/D10/D11を有効化
 // true : A3原信号が有効時のみ機能ボタンを有効化
-bool requireOriginalSignalForFunctionButtons = false;
+bool requireOriginalSignalForFunctionButtons = true;
 // false: Auto中でもD10/D11を有効化
 // true : Auto中はD10/D11を無効化（安全優先）
 bool disableOffsetButtonsWhileAuto = true;
-float functionSyncVoltage = 1.80; // destination voltage on first function-button press
+float functionSyncVoltage = 2.60; // destination voltage on first function-button press
 const float FUNCTION_TRANSITION_TIME_SEC = 2.0; // seconds to reach target or return voltage
 /* ------------------------------------------------------------
    D10/D11 オフセット機能 設定ガイド（日本語）
@@ -145,7 +145,7 @@ const float FUNCTION_TRANSITION_TIME_SEC = 2.0; // seconds to reach target or re
 float FUNCTION_OFFSET_STEP_V = 0.20f;
 // D11(下げ側オフセット)で下がり過ぎてECUエラーにならないよう、
 // 手動時のMCP出力下限を別設定で制限する
-float MANUAL_OUTPUT_MIN_V = 0.80f;
+float MANUAL_OUTPUT_MIN_V = 1.05f;
 const float ORIGINAL_SIGNAL_PRESENT_MIN_V = 0.10f;
 const float ORIGINAL_SIGNAL_PRESENT_MAX_V = 4.90f;
 /* ------------------------------------------------------------
@@ -169,8 +169,8 @@ const float ORIGINAL_SIGNAL_PRESENT_MAX_V = 4.90f;
    調整ポイント:
    - AUTO_OUTPUT_MIN_V / AUTO_OUTPUT_MAX_V を変更すると自動時の出力幅を変更可能
    ------------------------------------------------------------ */
-float AUTO_OUTPUT_MIN_V = 0.50f;  // D7 Auto後のMCP出力 下限[V]
-float AUTO_OUTPUT_MAX_V = 1.60f;  // D7 Auto後のMCP出力 上限[V]
+float AUTO_OUTPUT_MIN_V = 1.08f;  // D7 Auto後のMCP出力 下限[V]
+float AUTO_OUTPUT_MAX_V = 2.00f;  // D7 Auto後のMCP出力 上限[V]
 bool useMcpOutMonitorForFunctionButton = true; // D7 auto-on後のD8基準をA3ではなくMCP OUT監視値にする
 
 
