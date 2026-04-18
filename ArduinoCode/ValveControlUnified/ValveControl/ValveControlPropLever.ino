@@ -142,7 +142,7 @@ const float FUNCTION_TRANSITION_TIME_SEC = 2.0; // seconds to reach target or re
      例）0.20f なら 1 回押下で ±0.2V
    - MANUAL_OUTPUT_MIN_V を上げると、D11で下げる側の下限電圧を制限できます。
    ------------------------------------------------------------ */
-float FUNCTION_OFFSET_STEP_V = 0.20f;
+float FUNCTION_OFFSET_STEP_V = 0.02f;
 // D11(下げ側オフセット)で下がり過ぎてECUエラーにならないよう、
 // 手動時のMCP出力下限を別設定で制限する
 float MANUAL_OUTPUT_MIN_V = 1.05f;
