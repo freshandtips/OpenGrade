@@ -855,7 +855,15 @@ void HandleOffsetButtonsByOriginalSignal(void)
   // D10: +1カウント（押下1回で1カウント）
   if (functionBtn2Debounced == LOW && functionBtn2PrevDebounced == HIGH)
   {
-    functionOffsetCount++;
+    float manualUpperLimitV = functionSyncVoltage;
+    if (manualUpperLimitV > DAC_MAX_V) manualUpperLimitV = DAC_MAX_V;
+    if (manualUpperLimitV < DAC_MIN_V) manualUpperLimitV = DAC_MIN_V;
+
+    float manualOutVoltage = originalSensorVoltage + ((float)functionOffsetCount * FUNCTION_OFFSET_STEP_V);
+    if (manualOutVoltage < manualUpperLimitV)
+    {
+      functionOffsetCount++;
+    }
   }
 
   // D11: -1カウント（押下1回で1カウント）
@@ -941,10 +949,14 @@ void UpdateDACFromPWM(void)
   {
     float manualOutVoltage = originalSensorVoltage + ((float)functionOffsetCount * FUNCTION_OFFSET_STEP_V);
     float manualMinV = MANUAL_OUTPUT_MIN_V;
+    float manualMaxV = functionSyncVoltage;
     if (manualMinV < DAC_MIN_V) manualMinV = DAC_MIN_V;
     if (manualMinV > DAC_MAX_V) manualMinV = DAC_MAX_V;
+    if (manualMaxV < DAC_MIN_V) manualMaxV = DAC_MIN_V;
+    if (manualMaxV > DAC_MAX_V) manualMaxV = DAC_MAX_V;
+    if (manualMaxV < manualMinV) manualMaxV = manualMinV;
     if (manualOutVoltage < manualMinV) manualOutVoltage = manualMinV;
-    if (manualOutVoltage > DAC_MAX_V) manualOutVoltage = DAC_MAX_V;
+    if (manualOutVoltage > manualMaxV) manualOutVoltage = manualMaxV;
     dacVoltage = manualOutVoltage;
     WriteDACVoltage(dacVoltage);
     return;
