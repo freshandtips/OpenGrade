@@ -111,7 +111,7 @@ bool dacPositiveRaisesVoltage = true;
 bool syncDacToOriginalOnAutoEntry = true;
 float dacVoltage = 1.50;
 bool sendOriginalSensorRawInTelemetry = false; // keep old telemetry layout by default
-bool functionButtonEnabled = false;
+bool functionButtonEnabled = true;
 // 現場配線に合わせたゲート設定
 // false: D12未配線でもAuto DAC制御を有効化（D3/D4追従）
 // true : D12=LOW時のみAuto DAC制御
@@ -142,7 +142,7 @@ const float FUNCTION_TRANSITION_TIME_SEC = 2.0; // seconds to reach target or re
      例）0.20f なら 1 回押下で ±0.2V
    - MANUAL_OUTPUT_MIN_V を上げると、D11で下げる側の下限電圧を制限できます。
    ------------------------------------------------------------ */
-float FUNCTION_OFFSET_STEP_V = 0.02f;
+float FUNCTION_OFFSET_STEP_V = 0.04f;
 // D11(下げ側オフセット)で下がり過ぎてECUエラーにならないよう、
 // 手動時のMCP出力下限を別設定で制限する
 float MANUAL_OUTPUT_MIN_V = 1.05f;
@@ -170,7 +170,7 @@ const float ORIGINAL_SIGNAL_PRESENT_MAX_V = 4.90f;
    - AUTO_OUTPUT_MIN_V / AUTO_OUTPUT_MAX_V を変更すると自動時の出力幅を変更可能
    ------------------------------------------------------------ */
 float AUTO_OUTPUT_MIN_V = 1.08f;  // D7 Auto後のMCP出力 下限[V]
-float AUTO_OUTPUT_MAX_V = 2.00f;  // D7 Auto後のMCP出力 上限[V]
+float AUTO_OUTPUT_MAX_V = 2.20f;  // D7 Auto後のMCP出力 上限[V]
 bool useMcpOutMonitorForFunctionButton = true; // D7 auto-on後のD8基準をA3ではなくMCP OUT監視値にする
 
 
