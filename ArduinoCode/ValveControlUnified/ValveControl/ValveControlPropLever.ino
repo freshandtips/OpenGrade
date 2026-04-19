@@ -107,11 +107,16 @@ const float ADC_REF_V = 5.0;
 const float DAC_MIN_V = 1.05;
 const float DAC_MAX_V = 2.90;
 const float DAC_STEP_GAIN = 0.0020;
+// センサーぶれ対策（0.0～1.0）。小さいほど平滑化が強くなる
+const float SENSOR_FILTER_ALPHA = 0.20;
+// 出力更新の最小変化量[V]（細かな揺れでDACを更新し続けない）
+const float DAC_UPDATE_DEADBAND_V = 0.003;
 bool dacPositiveRaisesVoltage = true;
 bool syncDacToOriginalOnAutoEntry = true;
 float dacVoltage = 1.50;
 bool sendOriginalSensorRawInTelemetry = false; // keep old telemetry layout by default
-bool functionButtonEnabled = false;
+// D8(D10/D11)機能ボタンを有効化
+bool functionButtonEnabled = true;
 // 現場配線に合わせたゲート設定
 // false: D12未配線でもAuto DAC制御を有効化（D3/D4追従）
 // true : D12=LOW時のみAuto DAC制御
@@ -230,9 +235,11 @@ int onLedTime = 0;
 int autoLedTime = 0;
 int originalSensorRaw = 0;
 float originalSensorVoltage = 0.0;
+float originalSensorFilteredVoltage = 0.0;
 bool originalSignalPresent = false;
 int mcpOutMonitorRaw = 0;
 float mcpOutMonitorVoltage = 0.0;
+float mcpOutMonitorFilteredVoltage = 0.0;
 bool mcpOutMonitorPresent = false;
 byte prevAutoControlActive = 0;
 byte sensorModeSwitchDebounced = HIGH;
@@ -261,9 +268,11 @@ float functionStoredVoltage = 1.50;
 float functionMoveTargetVoltage = 1.50;
 float functionMoveStepVoltage = 0.0;
 int functionOffsetCount = 0;
+float lastWrittenDacVoltage = -100.0;
 
 void UpdateDACFromPWM(void);
 void WriteDACVoltage(float voltage);
+void WriteDACVoltageIfChanged(float voltage);
 byte IsAutoControlActive(void);
 void ReadOriginalSensorVoltage(void);
 void UpdateSensorModeSwitchState(void);
@@ -717,6 +726,9 @@ void ReadOriginalSensorVoltage(void)
 {
   originalSensorRaw = analogRead(TRACTOR_SENSOR_IN);
   originalSensorVoltage = ((float)originalSensorRaw / 1023.0) * ADC_REF_V;
+  // 1次IIRで平滑化（初回は生値を採用）
+  if (originalSensorFilteredVoltage <= 0.0) originalSensorFilteredVoltage = originalSensorVoltage;
+  else originalSensorFilteredVoltage += (originalSensorVoltage - originalSensorFilteredVoltage) * SENSOR_FILTER_ALPHA;
   originalSignalPresent = (originalSensorVoltage >= ORIGINAL_SIGNAL_PRESENT_MIN_V && originalSensorVoltage <= ORIGINAL_SIGNAL_PRESENT_MAX_V);
 }
 
@@ -791,6 +803,8 @@ void ReadMcpOutMonitorVoltage(void)
 {
   mcpOutMonitorRaw = analogRead(MCP_OUT_MONITOR_PIN);
   mcpOutMonitorVoltage = ((float)mcpOutMonitorRaw / 1023.0) * ADC_REF_V;
+  if (mcpOutMonitorFilteredVoltage <= 0.0) mcpOutMonitorFilteredVoltage = mcpOutMonitorVoltage;
+  else mcpOutMonitorFilteredVoltage += (mcpOutMonitorVoltage - mcpOutMonitorFilteredVoltage) * SENSOR_FILTER_ALPHA;
   mcpOutMonitorPresent = (mcpOutMonitorVoltage >= 0.05 && mcpOutMonitorVoltage <= 4.95);
 }
 
@@ -815,7 +829,7 @@ void HandleFunctionButtonPress(byte autoControlActive)
       // D7押下後(autoControlActive)はMCP OUT監視値を優先基準にする
       if (useMcpOutMonitorForFunctionButton && autoControlActive && mcpOutMonitorPresent)
       {
-        dacVoltage = mcpOutMonitorVoltage;
+        dacVoltage = mcpOutMonitorFilteredVoltage;
       }
       functionStoredVoltage = dacVoltage;
       functionMoveTargetVoltage = functionSyncVoltage;
@@ -941,13 +955,13 @@ void UpdateDACFromPWM(void)
     if (dacVoltage < DAC_MIN_V) dacVoltage = DAC_MIN_V;
     if (dacVoltage > DAC_MAX_V) dacVoltage = DAC_MAX_V;
 
-    WriteDACVoltage(dacVoltage);
+    WriteDACVoltageIfChanged(dacVoltage);
     return;
   }
 
   if (!autoControlActive)
   {
-    float manualOutVoltage = originalSensorVoltage + ((float)functionOffsetCount * FUNCTION_OFFSET_STEP_V);
+    float manualOutVoltage = originalSensorFilteredVoltage + ((float)functionOffsetCount * FUNCTION_OFFSET_STEP_V);
     float manualMinV = MANUAL_OUTPUT_MIN_V;
     float manualMaxV = functionSyncVoltage;
     if (manualMinV < DAC_MIN_V) manualMinV = DAC_MIN_V;
@@ -958,7 +972,7 @@ void UpdateDACFromPWM(void)
     if (manualOutVoltage < manualMinV) manualOutVoltage = manualMinV;
     if (manualOutVoltage > manualMaxV) manualOutVoltage = manualMaxV;
     dacVoltage = manualOutVoltage;
-    WriteDACVoltage(dacVoltage);
+    WriteDACVoltageIfChanged(dacVoltage);
     return;
   }
 
@@ -1000,7 +1014,7 @@ void UpdateDACFromPWM(void)
   if (dacVoltage < autoMinV) dacVoltage = autoMinV;
   if (dacVoltage > autoMaxV) dacVoltage = autoMaxV;
 
-  WriteDACVoltage(dacVoltage);
+  WriteDACVoltageIfChanged(dacVoltage);
 }
 
 void WriteDACVoltage(float voltage)
@@ -1011,6 +1025,15 @@ void WriteDACVoltage(float voltage)
   uint16_t dacCode = (uint16_t)((voltage / ADC_REF_V) * 4095.0);
   if (dacCode > 4095) dacCode = 4095;
   dac.setVoltage(dacCode, false);
+}
+
+void WriteDACVoltageIfChanged(float voltage)
+{
+  if (lastWrittenDacVoltage < -50.0 || fabs(voltage - lastWrittenDacVoltage) >= DAC_UPDATE_DEADBAND_V)
+  {
+    WriteDACVoltage(voltage);
+    lastWrittenDacVoltage = voltage;
+  }
 }
 
 void SaveToEEPROM() {
