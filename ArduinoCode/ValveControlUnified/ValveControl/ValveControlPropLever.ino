@@ -246,6 +246,7 @@ byte functionBtnLastRaw = HIGH;
 byte functionBtnPrevDebounced = HIGH;
 unsigned long functionBtnLastChange = 0;
 const byte FUNCTION_BTN_DEBOUNCE_MS = 25;
+const unsigned long FUNCTION_BTN_LONG_PRESS_MS = 5000UL; // D8 long-press threshold for position memory
 byte functionBtn2Debounced = HIGH;
 byte functionBtn2LastRaw = HIGH;
 byte functionBtn2PrevDebounced = HIGH;
@@ -261,6 +262,8 @@ float functionStoredVoltage = 1.50;
 float functionMoveTargetVoltage = 1.50;
 float functionMoveStepVoltage = 0.0;
 int functionOffsetCount = 0;
+unsigned long functionBtnPressStart = 0;
+bool functionBtnLongPressHandled = false;
 
 void UpdateDACFromPWM(void);
 void WriteDACVoltage(float voltage);
@@ -796,6 +799,8 @@ void ReadMcpOutMonitorVoltage(void)
 
 void HandleFunctionButtonPress(byte autoControlActive)
 {
+  unsigned long now = millis();
+
   if (!functionButtonEnabled)
   {
     functionBtnPrevDebounced = functionBtnDebounced;
@@ -808,7 +813,28 @@ void HandleFunctionButtonPress(byte autoControlActive)
     return;
   }
 
+  // Press edge: start long-press timer
   if (functionBtnDebounced == LOW && functionBtnPrevDebounced == HIGH)
+  {
+    functionBtnPressStart = now;
+    functionBtnLongPressHandled = false;
+  }
+
+  // Long-press (>=5s): store current A3 voltage as one-touch memory target
+  if (functionBtnDebounced == LOW && !functionBtnLongPressHandled)
+  {
+    if ((now - functionBtnPressStart) >= FUNCTION_BTN_LONG_PRESS_MS)
+    {
+      float memorizedVoltage = ReadOriginalSensorVoltageAveraged();
+      if (memorizedVoltage < DAC_MIN_V) memorizedVoltage = DAC_MIN_V;
+      if (memorizedVoltage > DAC_MAX_V) memorizedVoltage = DAC_MAX_V;
+      functionSyncVoltage = memorizedVoltage;
+      functionBtnLongPressHandled = true;
+    }
+  }
+
+  // Release edge: short press executes recall/return toggle
+  if (functionBtnDebounced == HIGH && functionBtnPrevDebounced == LOW && !functionBtnLongPressHandled)
   {
     if (!functionHoldActive && !functionReturnActive)
     {
@@ -829,6 +855,12 @@ void HandleFunctionButtonPress(byte autoControlActive)
       functionMoveTargetVoltage = functionStoredVoltage;
       functionMoveStepVoltage = CalcTransitionStepVoltage(dacVoltage, functionMoveTargetVoltage);
     }
+  }
+
+  // Reset long-press guard after release
+  if (functionBtnDebounced == HIGH && functionBtnPrevDebounced == LOW)
+  {
+    functionBtnLongPressHandled = false;
   }
 
   functionBtnPrevDebounced = functionBtnDebounced;
